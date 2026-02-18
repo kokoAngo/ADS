@@ -123,7 +123,7 @@ def get_neighboring_stations(railway, station):
 
 
 def update_notion_rank(page_id, rank_data):
-    """更新Notion中的市场排名列"""
+    """更新Notion中的市场排名列和広告数列"""
     url = f"https://api.notion.com/v1/pages/{page_id}"
     rank_text = f"{rank_data['rank']}/{rank_data['total_properties']}"
 
@@ -135,12 +135,93 @@ def update_notion_rank(page_id, rank_data):
         }
     }
 
+    # 如果有広告数，也更新
+    if "ad_count" in rank_data and rank_data["ad_count"] is not None:
+        data["properties"]["広告数"] = {"number": rank_data["ad_count"]}
+
     try:
         response = requests.patch(url, headers=notion_headers, json=data, timeout=30)
         return response.status_code == 200
     except Exception as e:
         print(f"    Notion更新失败: {e}")
         return False
+
+
+def get_ad_count_from_detail(page, context, prop):
+    """在搜索结果中找到物件并获取広告数"""
+    rent = prop.get("rent", 0)
+    area = prop.get("area_sqm", 0)
+    rent_man = rent / 10000  # 转换为万円
+
+    try:
+        # 在搜索结果中查找匹配的物件
+        casettes = page.locator('.cassetteitem').all()
+
+        for casette in casettes:
+            try:
+                # 获取租金
+                rent_elem = casette.locator('.cassetteitem_price--rent').first
+                if rent_elem.count() == 0:
+                    continue
+                rent_text = rent_elem.inner_text()
+
+                # 检查租金是否匹配
+                rent_match = re.search(r'(\d+(?:\.\d+)?)\s*万', rent_text)
+                if not rent_match:
+                    continue
+
+                casette_rent = float(rent_match.group(1))
+                if abs(casette_rent - rent_man) > 0.1:  # 允许0.1万的误差
+                    continue
+
+                # 获取面积
+                area_elem = casette.locator('.cassetteitem_menseki').first
+                if area_elem.count() > 0:
+                    area_text = area_elem.inner_text()
+                    area_match = re.search(r'(\d+(?:\.\d+)?)', area_text)
+                    if area_match:
+                        casette_area = float(area_match.group(1))
+                        if abs(casette_area - area) > 1:  # 允许1㎡的误差
+                            continue
+
+                # 找到匹配的物件，获取详情链接
+                detail_links = casette.locator('a').all()
+                for link in detail_links:
+                    href = link.get_attribute('href') or ''
+                    if '/chintai/' in href and 'jnc_' in href:
+                        full_url = 'https://suumo.jp' + href if href.startswith('/') else href
+
+                        # 打开新标签页访问详情
+                        detail_page = context.new_page()
+                        detail_page.goto(full_url, timeout=30000)
+                        time.sleep(2)
+
+                        # 获取広告数
+                        html = detail_page.content()
+
+                        # 查找"他の店舗がX店あります"
+                        other_count = 0
+                        match = re.search(r'他の店舗が(\d+)店', html)
+                        if match:
+                            other_count = int(match.group(1))
+
+                        # 総広告数 = 当前店舗(1) + 他の店舗
+                        ad_count = 1 + other_count
+
+                        detail_page.close()
+
+                        print(f"    ✓ 找到物件详情，広告数: {ad_count}")
+                        return ad_count
+
+            except Exception as e:
+                continue
+
+        print(f"    ✗ 未在搜索结果中找到匹配物件")
+        return None
+
+    except Exception as e:
+        print(f"    获取広告数失败: {e}")
+        return None
 
 
 def get_price_upper_limit(rent):
@@ -174,7 +255,7 @@ def get_area_tier(area_sqm):
     return result
 
 
-def analyze_market_rank(page, prop):
+def analyze_market_rank(page, context, prop):
     """使用SUUMO搜索分析市场排名 - 正确的页面点选流程"""
     rent = prop.get("rent", 0)
     area = prop.get("area_sqm", 0)
@@ -354,12 +435,16 @@ def analyze_market_rank(page, prop):
             cheaper_count = sum(1 for p in prices if p < rent)
             rank = cheaper_count + 1
 
+            # 步骤12: 获取広告数（在搜索结果中找到物件并查看详情）
+            ad_count = get_ad_count_from_detail(page, context, prop)
+
             return {
                 "total_properties": total,
                 "rank": rank,
                 "min_price": min(prices),
                 "max_price": max(prices),
-                "avg_price": sum(prices) / len(prices)
+                "avg_price": sum(prices) / len(prices),
+                "ad_count": ad_count
             }
 
         return None
@@ -376,9 +461,18 @@ def main():
     print("SUUMO市场排名分析 - 修复版")
     print("=" * 60)
 
-    # 读取高分物件
+    # 读取高分物件 (可通过命令行参数指定测试数量)
     with open('data/high_view_properties_6plus.json', 'r', encoding='utf-8') as f:
         properties = json.load(f)
+
+    # 如果有命令行参数，只处理指定数量
+    if len(sys.argv) > 1:
+        try:
+            limit = int(sys.argv[1])
+            properties = properties[:limit]
+            print(f"测试模式: 只处理前 {limit} 个物件")
+        except:
+            pass
 
     print(f"\n找到 {len(properties)} 个高分物件")
 
@@ -396,10 +490,11 @@ def main():
             print(f"\n[{i+1}/{len(properties)}] {prop['reins_id']}")
             print(f"  view得分: {prop['score']}, 租金: ¥{prop['rent']:,}")
 
-            rank_data = analyze_market_rank(page, prop)
+            rank_data = analyze_market_rank(page, context, prop)
 
             if rank_data:
-                print(f"  ✓ 市场排名: {rank_data['rank']}/{rank_data['total_properties']}")
+                ad_info = f", 広告数: {rank_data.get('ad_count', '?')}" if rank_data.get('ad_count') else ""
+                print(f"  ✓ 市场排名: {rank_data['rank']}/{rank_data['total_properties']}{ad_info}")
 
                 if update_notion_rank(prop["page_id"], rank_data):
                     print(f"    ✓ 已更新Notion")
@@ -421,7 +516,8 @@ def main():
             print(f"\n成功分析: {len(results)}/{len(properties)} 个物件")
             for r in results:
                 rd = r.get("rank_data", {})
-                print(f"  {r['reins_id']}: {rd.get('rank')}/{rd.get('total_properties')}")
+                ad_str = f", 広告:{rd.get('ad_count')}" if rd.get('ad_count') else ""
+                print(f"  {r['reins_id']}: {rd.get('rank')}/{rd.get('total_properties')}{ad_str}")
 
     finally:
         browser.close()
