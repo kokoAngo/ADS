@@ -419,7 +419,7 @@ def main():
     # 读取未评分物件映射
     print("\n读取未评分物件列表...")
     bukken_map = {}
-    with open('data/unscored_pages.txt', 'r', encoding='utf-8') as f:
+    with open('data/unscored_pages_new.txt', 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if '|' in line:
@@ -508,7 +508,19 @@ def main():
 
                 results.append(data)
             else:
-                print(f"  ✗ 未能获取物件数据")
+                print(f"  ✗ 未能获取物件数据，标记为-1")
+                # 更新Notion，标记物件不存在
+                try:
+                    update_props = {
+                        "予測_view数": {"number": -1}  # -1表示物件不存在
+                    }
+                    result = notion.update_page(page_id, update_props)
+                    if "id" in result:
+                        print(f"  ✓ 已标记为-1")
+                    else:
+                        print(f"  ✗ 标记失败")
+                except Exception as e:
+                    print(f"  ✗ 标记异常: {e}")
                 scraper.go_back_to_search()
 
             time.sleep(0.5)
