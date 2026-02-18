@@ -154,69 +154,80 @@ def get_ad_count_from_detail(page, context, prop):
     rent_man = rent / 10000  # 转换为万円
 
     try:
-        # 在搜索结果中查找匹配的物件
-        casettes = page.locator('.cassetteitem').all()
+        # 最多检查3页
+        for page_num in range(3):
+            if page_num > 0:
+                # 点击下一页
+                next_btn = page.locator('a:has-text("次へ")').first
+                if next_btn.count() > 0:
+                    next_btn.click()
+                    time.sleep(2)
+                else:
+                    break  # 没有下一页了
 
-        for casette in casettes:
-            try:
-                # 获取租金
-                rent_elem = casette.locator('.cassetteitem_price--rent').first
-                if rent_elem.count() == 0:
+            # 在搜索结果中查找匹配的物件
+            casettes = page.locator('.cassetteitem').all()
+
+            for casette in casettes:
+                try:
+                    # 获取租金
+                    rent_elem = casette.locator('.cassetteitem_price--rent').first
+                    if rent_elem.count() == 0:
+                        continue
+                    rent_text = rent_elem.inner_text()
+
+                    # 检查租金是否匹配
+                    rent_match = re.search(r'(\d+(?:\.\d+)?)\s*万', rent_text)
+                    if not rent_match:
+                        continue
+
+                    casette_rent = float(rent_match.group(1))
+                    if abs(casette_rent - rent_man) > 0.15:  # 允许0.15万的误差
+                        continue
+
+                    # 获取面积
+                    area_elem = casette.locator('.cassetteitem_menseki').first
+                    if area_elem.count() > 0:
+                        area_text = area_elem.inner_text()
+                        area_match = re.search(r'(\d+(?:\.\d+)?)', area_text)
+                        if area_match:
+                            casette_area = float(area_match.group(1))
+                            if abs(casette_area - area) > 2:  # 允许2㎡的误差
+                                continue
+
+                    # 找到匹配的物件，获取详情链接
+                    detail_links = casette.locator('a').all()
+                    for link in detail_links:
+                        href = link.get_attribute('href') or ''
+                        if '/chintai/' in href and 'jnc_' in href:
+                            full_url = 'https://suumo.jp' + href if href.startswith('/') else href
+
+                            # 打开新标签页访问详情
+                            detail_page = context.new_page()
+                            detail_page.goto(full_url, timeout=30000)
+                            time.sleep(2)
+
+                            # 获取広告数
+                            html = detail_page.content()
+
+                            # 查找"他の店舗がX店あります"
+                            other_count = 0
+                            match = re.search(r'他の店舗が(\d+)店', html)
+                            if match:
+                                other_count = int(match.group(1))
+
+                            # 総広告数 = 当前店舗(1) + 他の店舗
+                            ad_count = 1 + other_count
+
+                            detail_page.close()
+
+                            print(f"    ✓ 找到物件详情(第{page_num+1}页)，広告数: {ad_count}")
+                            return ad_count
+
+                except Exception as e:
                     continue
-                rent_text = rent_elem.inner_text()
 
-                # 检查租金是否匹配
-                rent_match = re.search(r'(\d+(?:\.\d+)?)\s*万', rent_text)
-                if not rent_match:
-                    continue
-
-                casette_rent = float(rent_match.group(1))
-                if abs(casette_rent - rent_man) > 0.1:  # 允许0.1万的误差
-                    continue
-
-                # 获取面积
-                area_elem = casette.locator('.cassetteitem_menseki').first
-                if area_elem.count() > 0:
-                    area_text = area_elem.inner_text()
-                    area_match = re.search(r'(\d+(?:\.\d+)?)', area_text)
-                    if area_match:
-                        casette_area = float(area_match.group(1))
-                        if abs(casette_area - area) > 1:  # 允许1㎡的误差
-                            continue
-
-                # 找到匹配的物件，获取详情链接
-                detail_links = casette.locator('a').all()
-                for link in detail_links:
-                    href = link.get_attribute('href') or ''
-                    if '/chintai/' in href and 'jnc_' in href:
-                        full_url = 'https://suumo.jp' + href if href.startswith('/') else href
-
-                        # 打开新标签页访问详情
-                        detail_page = context.new_page()
-                        detail_page.goto(full_url, timeout=30000)
-                        time.sleep(2)
-
-                        # 获取広告数
-                        html = detail_page.content()
-
-                        # 查找"他の店舗がX店あります"
-                        other_count = 0
-                        match = re.search(r'他の店舗が(\d+)店', html)
-                        if match:
-                            other_count = int(match.group(1))
-
-                        # 総広告数 = 当前店舗(1) + 他の店舗
-                        ad_count = 1 + other_count
-
-                        detail_page.close()
-
-                        print(f"    ✓ 找到物件详情，広告数: {ad_count}")
-                        return ad_count
-
-            except Exception as e:
-                continue
-
-        print(f"    ✗ 未在搜索结果中找到匹配物件")
+        print(f"    ✗ 未在前3页搜索结果中找到匹配物件")
         return None
 
     except Exception as e:
