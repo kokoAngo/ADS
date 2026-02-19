@@ -1,0 +1,100 @@
+{
+  "model_name": "XGBoost Inquiry Prediction Model",
+  "version": "1.0",
+  "training_samples": 54,
+  "feature_cols": [
+    "rent",
+    "area_sqm",
+    "built_year",
+    "walk_minutes",
+    "city_encoded",
+    "heat_level",
+    "rent_per_sqm",
+    "age",
+    "walk_level",
+    "plan_type",
+    "rent_level",
+    "area_level"
+  ],
+  "metrics": {
+    "mae": 0.1,
+    "r2": 0.759
+  },
+  "feature_importance": {
+    "rent": 0.0783,
+    "area_sqm": 0.5492,
+    "built_year": 0.0,
+    "walk_minutes": 0.179,
+    "city_encoded": 0.0,
+    "heat_level": 0.0,
+    "rent_per_sqm": 0.1934,
+    "age": 0.0,
+    "walk_level": 0.0,
+    "plan_type": 0.0,
+    "rent_level": 0.0,
+    "area_level": 0.0
+  },
+  "high_heat_areas": [
+    "江戸川区",
+    "新宿区",
+    "品川区",
+    "目黒区",
+    "中野区",
+    "豊島区",
+    "渋谷区"
+  ],
+  "mid_heat_areas": [
+    "大田区",
+    "北区",
+    "世田谷区",
+    "板橋区"
+  ],
+  "high_response_plans": [
+    "1DK",
+    "2DK",
+    "2K",
+    "3DK",
+    "3K"
+  ],
+  "mid_response_plans": [
+    "1LDK",
+    "3LDK",
+    "1K",
+    "2LDK"
+  ],
+  "city_mapping": {
+    "千代田区": 0,
+    "中央区": 1,
+    "港区": 2,
+    "新宿区": 3,
+    "文京区": 4,
+    "台東区": 5,
+    "墨田区": 6,
+    "江東区": 7,
+    "品川区": 8,
+    "目黒区": 9,
+    "大田区": 10,
+    "世田谷区": 11,
+    "渋谷区": 12,
+    "中野区": 13,
+    "杉並区": 14,
+    "豊島区": 15,
+    "北区": 16,
+    "荒川区": 17,
+    "板橋区": 18,
+    "練馬区": 19,
+    "足立区": 20,
+    "葛飾区": 21,
+    "江戸川区": 22,
+    "八王子市": 23,
+    "立川市": 24,
+    "三鷹市": 25,
+    "府中市": 26,
+    "調布市": 27,
+    "町田市": 28,
+    "日野市": 29,
+    "国分寺市": 30,
+    "小金井市": 31,
+    "武蔵野市": 32
+  }
+}
