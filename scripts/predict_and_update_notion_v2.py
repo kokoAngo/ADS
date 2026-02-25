@@ -573,6 +573,14 @@ def main():
                     if data.get('direction'):
                         update_props["建物_バルコニー方向"] = {"rich_text": [{"text": {"content": data['direction']}}]}
 
+                    # 检查是否为share house（千代田区且租金<=5万）
+                    address = data.get('address', '') or data.get('city', '')
+                    rent = data.get('rent', 0)
+                    rent_man = rent / 10000 if rent > 1000 else rent  # 统一为万单位
+                    if '千代田' in address and rent_man <= 5:
+                        update_props["広告可"] = {"select": {"name": "不可（物件）"}}
+                        print(f"  ⚠ 标记为広告不可（千代田区 ¥{rent_man}万 疑似share house）")
+
                     result = notion.update_page(page_id, update_props)
                     if "id" in result:
                         print(f"  ✓ Notion更新成功")
