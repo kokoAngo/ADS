@@ -8,14 +8,13 @@ import sys
 import time
 import re
 import math
-import csv
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(r"D:\Fango Ads")
 
 # 条件记录文件
-CONDITIONS_FILE = "Conditions.csv"
+CONDITIONS_FILE = "Conditions.md"
 # 日志文件
 LOG_FILE = "logs/suumo_rank.log"
 
@@ -25,7 +24,7 @@ os.makedirs("logs", exist_ok=True)
 # 日志输出函数
 def log(msg):
     """同时输出到控制台和日志文件"""
-    log(msg)
+    print(msg)
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(msg + '\n')
 
@@ -71,39 +70,58 @@ def update_notion_rank(page_id, rank_data):
 
 
 def log_search_condition(prop, rank_data, stations_searched):
-    """记录搜索条件到CSV文件"""
+    """记录搜索条件到Markdown文件"""
     file_exists = os.path.exists(CONDITIONS_FILE)
 
-    with open(CONDITIONS_FILE, 'a', newline='', encoding='utf-8-sig') as f:
-        fieldnames = [
-            'search_time', 'reins_id', 'score', 'rent', 'area', 'walk',
-            'railway', 'station', 'stations_searched', 'floor_plan',
-            'price_upper', 'walk_tier', 'area_tier',
-            'rank', 'total_properties', 'percentile'
-        ]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-
+    with open(CONDITIONS_FILE, 'a', encoding='utf-8') as f:
+        # 如果文件不存在，写入标题和表头
         if not file_exists:
-            writer.writeheader()
+            f.write("# SUUMO市场排名搜索条件记录\n\n")
+            f.write("| 时间 | REINS_ID | 得分 | 月费(租金+管理费) | 面积 | 徒步 | 沿线/车站 | 搜索条件 | 排名 | 百分位 |\n")
+            f.write("|------|----------|------|-------------------|------|------|-----------|----------|------|--------|\n")
 
-        writer.writerow({
-            'search_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'reins_id': prop.get('reins_id', ''),
-            'score': prop.get('score', ''),
-            'rent': prop.get('rent', ''),
-            'area': prop.get('area', ''),
-            'walk': prop.get('walk', ''),
-            'railway': prop.get('railway', ''),
-            'station': prop.get('station', ''),
-            'stations_searched': '/'.join(stations_searched) if stations_searched else '',
-            'floor_plan': prop.get('floor_plan', ''),
-            'price_upper': rank_data.get('price_upper', '') if rank_data else '',
-            'walk_tier': rank_data.get('walk_tier', '') if rank_data else '',
-            'area_tier': rank_data.get('area_tier', '') if rank_data else '',
-            'rank': rank_data.get('rank', '') if rank_data else '',
-            'total_properties': rank_data.get('total_properties', '') if rank_data else '',
-            'percentile': rank_data.get('percentile', '') if rank_data else ''
-        })
+        # 格式化月费显示
+        rent = prop.get('rent', 0)
+        mgmt = prop.get('management_fee', 0)
+        total = prop.get('total_monthly', rent)
+        if mgmt > 0:
+            monthly_str = f"¥{rent:,}+{mgmt:,}=¥{total:,}"
+        else:
+            monthly_str = f"¥{rent:,}"
+
+        # 格式化搜索条件
+        conditions = []
+        if rank_data:
+            conditions.append(f"≤{rank_data.get('price_upper')}万")
+            if rank_data.get('walk_tier'):
+                conditions.append(f"徒步≤{rank_data.get('walk_tier')}分")
+            if rank_data.get('area_tier'):
+                conditions.append(f"面积≥{rank_data.get('area_tier')}㎡")
+            if rank_data.get('no_key_money'):
+                conditions.append("礼金なし")
+        conditions_str = ", ".join(conditions)
+
+        # 格式化沿线/车站
+        railway = prop.get('railway', '')
+        station = prop.get('station', '')
+        stations_str = '/'.join(stations_searched) if stations_searched else station
+        location_str = f"{railway} {stations_str}"
+
+        # 格式化排名
+        if rank_data:
+            rank_str = f"{rank_data.get('rank')}/{rank_data.get('total_properties')}"
+            percentile_str = f"{rank_data.get('percentile')}%"
+        else:
+            rank_str = "-"
+            percentile_str = "-"
+
+        # 写入数据行
+        time_str = datetime.now().strftime('%m-%d %H:%M')
+        area = prop.get('area', '-')
+        walk = prop.get('walk', '-')
+        score = prop.get('score', '-')
+
+        f.write(f"| {time_str} | {prop.get('reins_id', '')} | {score} | {monthly_str} | {area}㎡ | {walk}分 | {location_str} | {conditions_str} | {rank_str} | {percentile_str} |\n")
 
 
 # 沿线车站顺序映射（用于获取前后站）
@@ -263,10 +281,18 @@ def get_high_score_properties(min_score=7.0):
         railway = get_text("交通1_沿線名")
         station = get_text("交通1_駅名")
         floor_plan = get_text("間取り")
+        key_money = get_number("礼金(ヶ月)")  # 礼金（月数）
+        management_fee = get_number("管理費(万)")  # 管理費（万円）
 
         # 租金单位转换（如果是万为单位）
         if rent and rent < 1000:
             rent = int(rent * 10000)
+
+        # 管理费单位转换（从万转换为日元）
+        if management_fee:
+            management_fee = int(management_fee * 10000)
+        else:
+            management_fee = 0
 
         if reins_id and rent:
             properties.append({
@@ -274,11 +300,14 @@ def get_high_score_properties(min_score=7.0):
                 "reins_id": reins_id,
                 "score": score,
                 "rent": int(rent),
+                "management_fee": management_fee,  # 管理費
+                "total_monthly": int(rent) + management_fee,  # 月总费用
                 "area": area,
                 "walk": walk,
                 "railway": railway,
                 "station": station,
-                "floor_plan": floor_plan
+                "floor_plan": floor_plan,
+                "key_money": key_money  # 礼金
             })
 
     return properties
@@ -287,18 +316,23 @@ def get_high_score_properties(min_score=7.0):
 def analyze_market_rank(page, prop):
     """在SUUMO上分析市场排名 - 通过手动导航
     返回: (rank_data, stations_searched) 元组
+    使用房租+管理费的总和进行比较
     """
     rent = prop.get("rent", 0)
+    management_fee = prop.get("management_fee", 0)
+    total_monthly = prop.get("total_monthly", rent)  # 月总费用 = 房租 + 管理费
     area = prop.get("area", 0)
     walk = prop.get("walk", 10)
     station = prop.get("station", "")
     railway = prop.get("railway", "")
+    key_money = prop.get("key_money")  # 礼金（月数）
     stations_searched = []  # 记录搜索的车站
 
-    # 计算筛选条件
-    price_upper = get_price_upper_limit(rent)
+    # 计算筛选条件 - 使用月总费用计算价格上限
+    price_upper = get_price_upper_limit(total_monthly)
     walk_tier = get_walk_tier(walk)
     area_tier = get_area_tier(area)
+    no_key_money = (key_money is None or key_money == 0)  # 是否无礼金
 
     # 显示筛选条件
     conditions = [f"价格≤{price_upper}万"]
@@ -306,6 +340,8 @@ def analyze_market_rank(page, prop):
         conditions.append(f"徒步≤{walk_tier}分")
     if area_tier:
         conditions.append(f"面积≥{area_tier}㎡")
+    if no_key_money:
+        conditions.append("礼金なし")
     log(f"    筛选条件: {', '.join(conditions)}")
 
     try:
@@ -427,6 +463,25 @@ def analyze_market_rank(page, prop):
                         except:
                             pass
 
+            # 8-4. 如果没有礼金，勾选礼金なし
+            if no_key_money:
+                try:
+                    # 尝试多种方式找到礼金なし复选框
+                    reikin_checkbox = page.locator('input[type="checkbox"][name*="kz"], label:has-text("礼金なし"), input[id*="reikin"]').first
+                    if reikin_checkbox.count() > 0:
+                        # 检查是否已勾选
+                        if not reikin_checkbox.is_checked():
+                            reikin_checkbox.click()
+                            time.sleep(0.5)
+                    else:
+                        # 尝试通过文本查找
+                        reikin_label = page.locator('label:has-text("礼金なし")').first
+                        if reikin_label.count() > 0:
+                            reikin_label.click()
+                            time.sleep(0.5)
+                except Exception as e:
+                    log(f"    礼金なし复选框设置失败: {e}")
+
             # 点击搜索按钮应用条件
             apply_btn = page.locator('button:has-text("検索"), input[value*="検索"], button:has-text("この条件で検索")').first
             if apply_btn.count() > 0:
@@ -483,7 +538,8 @@ def analyze_market_rank(page, prop):
 
         if prices:
             total = len(prices)
-            cheaper_count = sum(1 for p in prices if p < rent)
+            # 使用月总费用（房租+管理费）进行比较
+            cheaper_count = sum(1 for p in prices if p < total_monthly)
             rank = cheaper_count + 1
             percentile = (cheaper_count / total) * 100 if total > 0 else 0
 
@@ -496,7 +552,9 @@ def analyze_market_rank(page, prop):
                 "avg_price": sum(prices) / len(prices),
                 "price_upper": price_upper,
                 "walk_tier": walk_tier,
-                "area_tier": area_tier
+                "area_tier": area_tier,
+                "no_key_money": no_key_money,  # 是否筛选礼金なし
+                "total_monthly": total_monthly  # 月总费用
             }
             return rank_data, stations_searched
 
@@ -526,7 +584,10 @@ def main():
 
     # 显示物件信息
     for p in properties:
-        log(f"  - {p['reins_id']}: 得分{p['score']}, ¥{p['rent']:,}, {p['railway']}/{p['station']}")
+        if p.get('management_fee', 0) > 0:
+            log(f"  - {p['reins_id']}: 得分{p['score']}, ¥{p['rent']:,}+{p['management_fee']:,}=¥{p['total_monthly']:,}, {p['railway']}/{p['station']}")
+        else:
+            log(f"  - {p['reins_id']}: 得分{p['score']}, ¥{p['rent']:,}, {p['railway']}/{p['station']}")
 
     # 启动浏览器
     log("\n启动浏览器...")
@@ -540,12 +601,15 @@ def main():
     try:
         for i, prop in enumerate(properties):
             log(f"\n[{i+1}/{len(properties)}] {prop['reins_id']}")
-            log(f"  得分: {prop['score']}, 租金: ¥{prop['rent']:,}")
+            if prop.get('management_fee', 0) > 0:
+                log(f"  得分: {prop['score']}, 月费: ¥{prop['rent']:,}+¥{prop['management_fee']:,}=¥{prop['total_monthly']:,}")
+            else:
+                log(f"  得分: {prop['score']}, 租金: ¥{prop['rent']:,}")
             log(f"  沿线: {prop.get('railway', 'N/A')}, 车站: {prop.get('station', 'N/A')}")
 
             rank_data, stations_searched = analyze_market_rank(page, prop)
 
-            # 记录搜索条件到CSV
+            # 记录搜索条件到Markdown
             log_search_condition(prop, rank_data, stations_searched)
             log(f"    ✓ 已记录搜索条件到 {CONDITIONS_FILE}")
 
@@ -555,6 +619,8 @@ def main():
                     filters.append(f"徒步≤{rank_data.get('walk_tier')}分")
                 if rank_data.get('area_tier'):
                     filters.append(f"面积≥{rank_data.get('area_tier')}㎡")
+                if rank_data.get('no_key_money'):
+                    filters.append("礼金なし")
                 log(f"  ✓ 市场排名: {rank_data['rank']}/{rank_data['total_properties']} ({', '.join(filters)})")
                 log(f"    价格百分位: {rank_data['percentile']}% (越低越便宜)")
                 log(f"    市场范围: ¥{rank_data['min_price']:,.0f} ~ ¥{rank_data['max_price']:,.0f}")
@@ -584,9 +650,12 @@ def main():
             for r in sorted(results, key=lambda x: x.get("rank_data", {}).get("percentile", 100)):
                 rd = r.get("rank_data", {})
                 status = "便宜" if rd.get('percentile', 100) < 30 else ("中等" if rd.get('percentile', 100) < 70 else "偏贵")
-                log(f"{r['reins_id']}: 得分{r['score']}, ¥{r['rent']:,}")
+                if r.get('management_fee', 0) > 0:
+                    log(f"{r['reins_id']}: 得分{r['score']}, 月费¥{r['total_monthly']:,}")
+                else:
+                    log(f"{r['reins_id']}: 得分{r['score']}, ¥{r['rent']:,}")
                 log(f"  排名: {rd.get('rank')}/{rd.get('total_properties')}, 百分位: {rd.get('percentile')}% ({status})")
-                log()
+                log("")
 
     finally:
         browser.close()
