@@ -309,8 +309,16 @@ class ReinsScraper:
             pass
 
 
+# 朝向编码
+DIRECTION_MAP = {
+    '南': 3, '南東': 2, '南西': 2,
+    '東': 1, '西': 1,
+    '北東': 0, '北西': 0, '北': 0
+}
+
+
 def prepare_features(data):
-    """准备模型特征 (v3 - 数据驱动分档)"""
+    """准备模型特征 (v4 - 支持扩展特征)"""
     rent = data.get('rent', 80000)
     area_sqm = data.get('area_sqm', 25)
     built_year = data.get('built_year', 2010)
@@ -318,8 +326,37 @@ def prepare_features(data):
     city = data.get('city', '')
     floor_plan = data.get('floor_plan', '1K')
 
+    # 新增特征
+    management_fee = data.get('management_fee', 0)
+    deposit = data.get('deposit', 1.0)
+    key_money = data.get('key_money', 1.0)
+    floor = data.get('floor', 5)
+    direction = data.get('direction', '')
+
+    # 转换类型
+    if isinstance(deposit, str):
+        try:
+            deposit = float(deposit)
+        except:
+            deposit = 1.0
+    if isinstance(key_money, str):
+        try:
+            key_money = float(key_money)
+        except:
+            key_money = 1.0
+
     rent_per_sqm = rent / area_sqm if area_sqm > 0 else 0
     age = 2025 - built_year
+
+    # 总租金 (賃料 + 管理費)
+    total_rent = rent + management_fee
+
+    # 朝向编码
+    direction_encoded = DIRECTION_MAP.get(direction, 1)
+
+    # 零礼金/零敷金标志
+    zero_deposit = 1 if deposit == 0 else 0
+    zero_key_money = 1 if key_money == 0 else 0
 
     # 区域热度三档
     high_heat_areas = config.get('high_heat_areas', [
@@ -389,7 +426,7 @@ def prepare_features(data):
     })
     city_encoded = city_mapping.get(city, 0)
 
-    # 特征列表 (与模型训练时一致)
+    # 特征列表 (12个原有特征 - 与v1模型兼容)
     features = [
         rent, area_sqm, built_year, walk_minutes,
         city_encoded, heat_level, rent_per_sqm, age,
@@ -496,6 +533,25 @@ def main():
                     if data.get('city') or data.get('address'):
                         address = data.get('address', data.get('city', ''))
                         update_props["所在地"] = {"rich_text": [{"text": {"content": address}}]}
+
+                    # 新增字段: 管理費, 楼層, 敷金, 礼金, 朝向
+                    if data.get('management_fee'):
+                        # 管理費从円转换为万円
+                        update_props["管理費(万)"] = {"number": round(data['management_fee'] / 10000, 2)}
+                    if data.get('floor'):
+                        update_props["建物_所在階"] = {"number": data['floor']}
+                    if data.get('total_floors'):
+                        update_props["建物_地上階層"] = {"number": data['total_floors']}
+                    if data.get('deposit'):
+                        # 敷金已经是月数
+                        deposit_val = float(data['deposit']) if isinstance(data['deposit'], str) else data['deposit']
+                        update_props["敷金(ヶ月)"] = {"number": deposit_val}
+                    if data.get('key_money'):
+                        # 礼金已经是月数
+                        key_money_val = float(data['key_money']) if isinstance(data['key_money'], str) else data['key_money']
+                        update_props["礼金(ヶ月)"] = {"number": key_money_val}
+                    if data.get('direction'):
+                        update_props["建物_バルコニー方向"] = {"rich_text": [{"text": {"content": data['direction']}}]}
 
                     result = notion.update_page(page_id, update_props)
                     if "id" in result:
