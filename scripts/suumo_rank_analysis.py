@@ -16,6 +16,18 @@ os.chdir(r"D:\Fango Ads")
 
 # 条件记录文件
 CONDITIONS_FILE = "Conditions.csv"
+# 日志文件
+LOG_FILE = "logs/suumo_rank.log"
+
+# 确保logs目录存在
+os.makedirs("logs", exist_ok=True)
+
+# 日志输出函数
+def log(msg):
+    """同时输出到控制台和日志文件"""
+    log(msg)
+    with open(LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(msg + '\n')
 
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
@@ -54,7 +66,7 @@ def update_notion_rank(page_id, rank_data):
         response = requests.patch(url, headers=headers, json=data, timeout=30)
         return response.status_code == 200
     except Exception as e:
-        print(f"    Notion更新失败: {e}")
+        log(f"    Notion更新失败: {e}")
         return False
 
 
@@ -113,6 +125,24 @@ RAILWAY_STATIONS = {
     "丸ノ内線": ["荻窪", "南阿佐ケ谷", "新高円寺", "東高円寺", "新中野", "中野坂上", "西新宿", "新宿",
                "新宿三丁目", "新宿御苑前", "四谷三丁目", "四ツ谷", "赤坂見附", "国会議事堂前", "霞ケ関",
                "銀座", "東京", "大手町", "淡路町", "御茶ノ水", "本郷三丁目", "後楽園", "茗荷谷", "新大塚", "池袋"],
+    "有楽町線": ["和光市", "地下鉄成増", "地下鉄赤塚", "平和台", "氷川台", "小竹向原", "千川", "要町",
+                "池袋", "東池袋", "護国寺", "江戸川橋", "飯田橋", "市ケ谷", "麹町", "永田町", "桜田門",
+                "有楽町", "銀座一丁目", "新富町", "月島", "豊洲", "辰巳", "新木場"],
+    "副都心線": ["和光市", "地下鉄成増", "地下鉄赤塚", "平和台", "氷川台", "小竹向原", "千川", "要町",
+                "池袋", "雑司が谷", "西早稲田", "東新宿", "新宿三丁目", "北参道", "明治神宮前", "渋谷"],
+    "東西線": ["中野", "落合", "高田馬場", "早稲田", "神楽坂", "飯田橋", "九段下", "竹橋", "大手町",
+              "日本橋", "茅場町", "門前仲町", "木場", "東陽町", "南砂町", "西葛西", "葛西", "浦安", "西船橋"],
+    "都営新宿線": ["新宿", "新宿三丁目", "曙橋", "市ヶ谷", "九段下", "神保町", "小川町", "岩本町",
+                  "馬喰横山", "浜町", "森下", "菊川", "住吉", "西大島", "大島", "東大島", "船堀", "一之江", "瑞江", "篠崎", "本八幡"],
+    "京王線": ["新宿", "初台", "幡ヶ谷", "笹塚", "代田橋", "明大前", "下高井戸", "桜上水", "上北沢",
+              "八幡山", "芦花公園", "千歳烏山", "仙川", "つつじヶ丘", "柴崎", "国領", "布田", "調布"],
+    "総武線": ["東京", "新日本橋", "馬喰町", "錦糸町", "亀戸", "平井", "新小岩", "小岩", "市川", "本八幡",
+              "下総中山", "西船橋", "船橋", "東船橋", "津田沼", "幕張本郷", "幕張", "新検見川", "稲毛", "千葉"],
+    "総武中央線": ["三鷹", "吉祥寺", "西荻窪", "荻窪", "阿佐ケ谷", "高円寺", "中野", "東中野", "大久保", "新宿",
+                  "代々木", "千駄ケ谷", "信濃町", "四ツ谷", "市ケ谷", "飯田橋", "水道橋", "御茶ノ水", "秋葉原",
+                  "浅草橋", "両国", "錦糸町", "亀戸", "平井", "新小岩", "小岩", "市川", "本八幡", "西船橋", "津田沼", "千葉"],
+    "半蔵門線": ["渋谷", "表参道", "青山一丁目", "永田町", "半蔵門", "九段下", "神保町", "大手町", "三越前",
+                "水天宮前", "清澄白河", "住吉", "錦糸町", "押上"],
 }
 
 
@@ -185,12 +215,20 @@ def get_neighboring_stations(railway, station):
 
 
 def get_high_score_properties(min_score=7.0):
-    """获取高分物件列表"""
+    """获取高分且没有市場順位的物件列表"""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     data = {
         "filter": {
-            "property": "予測_view数",
-            "number": {"greater_than_or_equal_to": min_score}
+            "and": [
+                {
+                    "property": "予測_view数",
+                    "number": {"greater_than_or_equal_to": min_score}
+                },
+                {
+                    "property": "市場順位",
+                    "rich_text": {"is_empty": True}
+                }
+            ]
         },
         "page_size": 50
     }
@@ -268,30 +306,30 @@ def analyze_market_rank(page, prop):
         conditions.append(f"徒步≤{walk_tier}分")
     if area_tier:
         conditions.append(f"面积≥{area_tier}㎡")
-    print(f"    筛选条件: {', '.join(conditions)}")
+    log(f"    筛选条件: {', '.join(conditions)}")
 
     try:
         # 1. 访问SUUMO首页
         page.goto("https://suumo.jp/kanto/", timeout=60000)
-        time.sleep(2)
+        time.sleep(1)
 
         # 2. 点击賃貸物件
         rental_link = page.locator('a:has-text("賃貸物件")').first
         if rental_link.count() > 0:
             rental_link.click()
-            time.sleep(2)
+            time.sleep(1)
 
         # 3. 点击東京都
         tokyo_link = page.locator('a:has-text("東京都")').first
         if tokyo_link.count() > 0:
             tokyo_link.click()
-            time.sleep(2)
+            time.sleep(1)
 
         # 4. 点击沿線
         ensen_link = page.locator('a:has-text("沿線")').first
         if ensen_link.count() > 0:
             ensen_link.click()
-            time.sleep(2)
+            time.sleep(1)
 
         # 5. 查找并点击沿线
         if railway:
@@ -309,13 +347,13 @@ def analyze_market_rank(page, prop):
         search_btn = page.locator('button:has-text("検索"), input[value*="検索"], button:has-text("この条件で検索")').first
         if search_btn.count() > 0:
             search_btn.click()
-            time.sleep(3)
+            time.sleep(1.5)
 
         # 7. 如果有车站选择页面，选择车站（包括前后站，共3站）
         if station:
             # 获取前后站
             neighboring_stations = get_neighboring_stations(railway, station)
-            print(f"    搜索范围: {' / '.join(neighboring_stations)}")
+            log(f"    搜索范围: {' / '.join(neighboring_stations)}")
 
             selected_count = 0
             for st in neighboring_stations:
@@ -334,7 +372,7 @@ def analyze_market_rank(page, prop):
                 search_btn = page.locator('button:has-text("検索"), input[value*="検索"]').first
                 if search_btn.count() > 0:
                     search_btn.click()
-                    time.sleep(3)
+                    time.sleep(1.5)
 
         # 8. 设置筛选条件（价格上限 + 徒步时间 + 面积下限）
         try:
@@ -342,7 +380,7 @@ def analyze_market_rank(page, prop):
             change_btn = page.locator('a:has-text("条件を変更"), button:has-text("条件を変更"), a:has-text("絞り込み")').first
             if change_btn.count() > 0:
                 change_btn.click()
-                time.sleep(2)
+                time.sleep(1)
 
             # 8-1. 设置賃料上限
             price_upper_value = str(price_upper).replace('.0', '').replace('.5', '5')
@@ -393,16 +431,16 @@ def analyze_market_rank(page, prop):
             apply_btn = page.locator('button:has-text("検索"), input[value*="検索"], button:has-text("この条件で検索")').first
             if apply_btn.count() > 0:
                 apply_btn.click()
-                time.sleep(3)
+                time.sleep(1.5)
         except Exception as e:
-            print(f"    设置筛选条件失败: {e}")
+            log(f"    设置筛选条件失败: {e}")
 
         # 9. 获取搜索结果中的价格
         prices = []
         price_upper_yen = price_upper * 10000  # 转换为日元
 
         # 等待结果加载
-        time.sleep(2)
+        time.sleep(1)
 
         # 尝试多种选择器获取价格
         price_selectors = [
@@ -465,31 +503,33 @@ def analyze_market_rank(page, prop):
         return None, stations_searched
 
     except Exception as e:
-        print(f"  分析错误: {e}")
+        log(f"  分析错误: {e}")
         return None, stations_searched
 
 
 def main():
-    print("=" * 60)
-    print("SUUMO市场排名分析 v2")
-    print("分析得分>=7的物件在市场中的价格排名")
-    print("=" * 60)
+    # 添加运行时间戳到日志
+    log(f"\n\n{'='*60}")
+    log(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log("SUUMO市场排名分析 v2")
+    log("分析得分>=6且无市場順位的物件")
+    log("=" * 60)
 
     # 获取高分物件
-    print("\n获取高分物件...")
-    properties = get_high_score_properties(min_score=7.0)
-    print(f"找到 {len(properties)} 个得分>=7的物件")
+    log("\n获取高分物件...")
+    properties = get_high_score_properties(min_score=6.0)
+    log(f"找到 {len(properties)} 个得分>=6的物件")
 
     if not properties:
-        print("没有找到高分物件")
+        log("没有找到高分物件")
         return
 
     # 显示物件信息
     for p in properties:
-        print(f"  - {p['reins_id']}: 得分{p['score']}, ¥{p['rent']:,}, {p['railway']}/{p['station']}")
+        log(f"  - {p['reins_id']}: 得分{p['score']}, ¥{p['rent']:,}, {p['railway']}/{p['station']}")
 
     # 启动浏览器
-    print("\n启动浏览器...")
+    log("\n启动浏览器...")
     playwright = sync_playwright().start()
     browser = playwright.chromium.launch(headless=False)
     context = browser.new_context(viewport={"width": 1920, "height": 1080}, locale="ja-JP")
@@ -499,15 +539,15 @@ def main():
 
     try:
         for i, prop in enumerate(properties):
-            print(f"\n[{i+1}/{len(properties)}] {prop['reins_id']}")
-            print(f"  得分: {prop['score']}, 租金: ¥{prop['rent']:,}")
-            print(f"  沿线: {prop.get('railway', 'N/A')}, 车站: {prop.get('station', 'N/A')}")
+            log(f"\n[{i+1}/{len(properties)}] {prop['reins_id']}")
+            log(f"  得分: {prop['score']}, 租金: ¥{prop['rent']:,}")
+            log(f"  沿线: {prop.get('railway', 'N/A')}, 车站: {prop.get('station', 'N/A')}")
 
             rank_data, stations_searched = analyze_market_rank(page, prop)
 
             # 记录搜索条件到CSV
             log_search_condition(prop, rank_data, stations_searched)
-            print(f"    ✓ 已记录搜索条件到 {CONDITIONS_FILE}")
+            log(f"    ✓ 已记录搜索条件到 {CONDITIONS_FILE}")
 
             if rank_data:
                 filters = [f"≤{rank_data.get('price_upper')}万"]
@@ -515,43 +555,43 @@ def main():
                     filters.append(f"徒步≤{rank_data.get('walk_tier')}分")
                 if rank_data.get('area_tier'):
                     filters.append(f"面积≥{rank_data.get('area_tier')}㎡")
-                print(f"  ✓ 市场排名: {rank_data['rank']}/{rank_data['total_properties']} ({', '.join(filters)})")
-                print(f"    价格百分位: {rank_data['percentile']}% (越低越便宜)")
-                print(f"    市场范围: ¥{rank_data['min_price']:,.0f} ~ ¥{rank_data['max_price']:,.0f}")
-                print(f"    市场均价: ¥{rank_data['avg_price']:,.0f}")
+                log(f"  ✓ 市场排名: {rank_data['rank']}/{rank_data['total_properties']} ({', '.join(filters)})")
+                log(f"    价格百分位: {rank_data['percentile']}% (越低越便宜)")
+                log(f"    市场范围: ¥{rank_data['min_price']:,.0f} ~ ¥{rank_data['max_price']:,.0f}")
+                log(f"    市场均价: ¥{rank_data['avg_price']:,.0f}")
 
                 # 更新Notion
                 if update_notion_rank(prop["page_id"], rank_data):
-                    print(f"    ✓ 已更新Notion")
+                    log(f"    ✓ 已更新Notion")
                 else:
-                    print(f"    ✗ Notion更新失败")
+                    log(f"    ✗ Notion更新失败")
 
                 prop["rank_data"] = rank_data
                 results.append(prop)
             else:
-                print(f"  ✗ 无法获取市场数据")
+                log(f"  ✗ 无法获取市场数据")
 
-            time.sleep(2)
+            time.sleep(1)
 
         # 输出总结
-        print("\n" + "=" * 60)
-        print("分析完成!")
-        print("=" * 60)
+        log("\n" + "=" * 60)
+        log("分析完成!")
+        log("=" * 60)
 
         if results:
-            print("\n高分物件市场排名汇总:")
-            print("-" * 60)
+            log("\n高分物件市场排名汇总:")
+            log("-" * 60)
             for r in sorted(results, key=lambda x: x.get("rank_data", {}).get("percentile", 100)):
                 rd = r.get("rank_data", {})
                 status = "便宜" if rd.get('percentile', 100) < 30 else ("中等" if rd.get('percentile', 100) < 70 else "偏贵")
-                print(f"{r['reins_id']}: 得分{r['score']}, ¥{r['rent']:,}")
-                print(f"  排名: {rd.get('rank')}/{rd.get('total_properties')}, 百分位: {rd.get('percentile')}% ({status})")
-                print()
+                log(f"{r['reins_id']}: 得分{r['score']}, ¥{r['rent']:,}")
+                log(f"  排名: {rd.get('rank')}/{rd.get('total_properties')}, 百分位: {rd.get('percentile')}% ({status})")
+                log()
 
     finally:
         browser.close()
         playwright.stop()
-        print("浏览器关闭")
+        log("浏览器关闭")
 
 
 if __name__ == "__main__":
