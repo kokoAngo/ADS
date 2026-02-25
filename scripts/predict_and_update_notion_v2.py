@@ -38,11 +38,11 @@ NOTION_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
 # 筛选阈值
 SCORE_THRESHOLD = 3.0
 
-# 加载模型
-with open("models/xgboost_regressor.pkl", "rb") as f:
+# 加载V2模型
+with open("models/xgboost_regressor_v2.pkl", "rb") as f:
     model = pickle.load(f)
 
-with open("models/model_config.json", "r") as f:
+with open("models/model_config_v2.json", "r", encoding='utf-8') as f:
     config = json.load(f)
 
 
@@ -197,6 +197,27 @@ class ReinsScraper:
                     data['city'] = ward
                     break
 
+            # 提取建物種別 (マンション/アパート)
+            for btype in ['マンション', 'アパート', '一戸建て', 'テラスハウス']:
+                if btype in text:
+                    data['property_type'] = btype
+                    break
+
+            # 提取管理費
+            m = re.search(r'管理費[：:\s]*(\d+(?:,\d+)?)\s*円', text)
+            if m:
+                data['management_fee'] = int(m.group(1).replace(',', ''))
+
+            # 提取敷金
+            m = re.search(r'敷金[：:\s]*(\d+(?:\.\d+)?)\s*[ヶヵ]?月?', text)
+            if m:
+                data['deposit'] = float(m.group(1))
+
+            # 提取礼金
+            m = re.search(r'礼金[：:\s]*(\d+(?:\.\d+)?)\s*[ヶヵ]?月?', text)
+            if m:
+                data['key_money'] = float(m.group(1))
+
             return data
 
         except Exception as e:
@@ -318,20 +339,19 @@ DIRECTION_MAP = {
 
 
 def prepare_features(data):
-    """准备模型特征 (v4 - 支持扩展特征)"""
+    """准备模型特征 (V2 - 21个特征，与train_model_v2.py一致)"""
     rent = data.get('rent', 80000)
     area_sqm = data.get('area_sqm', 25)
     built_year = data.get('built_year', 2010)
     walk_minutes = data.get('walk_minutes', 10)
     city = data.get('city', '')
     floor_plan = data.get('floor_plan', '1K')
+    property_type = data.get('property_type', '')
 
-    # 新增特征
+    # 费用相关特征
     management_fee = data.get('management_fee', 0)
     deposit = data.get('deposit', 1.0)
     key_money = data.get('key_money', 1.0)
-    floor = data.get('floor', 5)
-    direction = data.get('direction', '')
 
     # 转换类型
     if isinstance(deposit, str):
@@ -345,26 +365,22 @@ def prepare_features(data):
         except:
             key_money = 1.0
 
-    rent_per_sqm = rent / area_sqm if area_sqm > 0 else 0
-    age = 2025 - built_year
-
-    # 总租金 (賃料 + 管理費)
+    # 派生特征
     total_rent = rent + management_fee
-
-    # 朝向编码
-    direction_encoded = DIRECTION_MAP.get(direction, 1)
+    rent_per_sqm = rent / area_sqm if area_sqm > 0 else 0
+    total_rent_per_sqm = total_rent / area_sqm if area_sqm > 0 else 0
+    age = 2026 - built_year
 
     # 零礼金/零敷金标志
     zero_deposit = 1 if deposit == 0 else 0
     zero_key_money = 1 if key_money == 0 else 0
 
+    # 初期费用
+    initial_cost = deposit + key_money
+
     # 区域热度三档
-    high_heat_areas = config.get('high_heat_areas', [
-        '江戸川区', '新宿区', '品川区', '目黒区', '中野区', '豊島区', '渋谷区'
-    ])
-    mid_heat_areas = config.get('mid_heat_areas', [
-        '大田区', '北区', '世田谷区', '板橋区'
-    ])
+    high_heat_areas = config.get('high_heat_areas', [])
+    mid_heat_areas = config.get('mid_heat_areas', [])
 
     if city in high_heat_areas:
         heat_level = 2
@@ -373,24 +389,32 @@ def prepare_features(data):
     else:
         heat_level = 0
 
-    # 徒步距离三档 (基于数据分析: 6-10分最佳)
+    # 徒步距离三档
     if walk_minutes <= 5:
-        walk_level = 1  # 近
+        walk_level = 2
     elif walk_minutes <= 10:
-        walk_level = 2  # 中 (最佳)
+        walk_level = 1
     else:
-        walk_level = 0  # 远
+        walk_level = 0
 
-    # 户型三档 (基于反响数据)
-    high_response_plans = config.get('high_response_plans', ['1DK', '2DK', '2K', '3DK', '3K'])
-    mid_response_plans = config.get('mid_response_plans', ['1LDK', '3LDK', '1K', '2LDK'])
+    # 户型三档
+    high_response_plans = config.get('high_response_plans', [])
+    mid_response_plans = config.get('mid_response_plans', [])
 
     if floor_plan in high_response_plans:
-        plan_type = 2  # 高反响户型
+        plan_type = 2
     elif floor_plan in mid_response_plans:
-        plan_type = 1  # 中反响户型
+        plan_type = 1
     else:
-        plan_type = 0  # 其他
+        plan_type = 0
+
+    # 建物类型编码
+    if 'マンション' in str(property_type):
+        building_type = 2
+    elif 'アパート' in str(property_type):
+        building_type = 1
+    else:
+        building_type = 0
 
     # 租金等级
     if rent < 60000:
@@ -415,22 +439,18 @@ def prepare_features(data):
         area_level = 3
 
     # 区域编码
-    city_mapping = config.get('city_mapping', {
-        '千代田区': 0, '中央区': 1, '港区': 2, '新宿区': 3, '文京区': 4,
-        '台東区': 5, '墨田区': 6, '江東区': 7, '品川区': 8, '目黒区': 9,
-        '大田区': 10, '世田谷区': 11, '渋谷区': 12, '中野区': 13, '杉並区': 14,
-        '豊島区': 15, '北区': 16, '荒川区': 17, '板橋区': 18, '練馬区': 19,
-        '足立区': 20, '葛飾区': 21, '江戸川区': 22,
-        '八王子市': 23, '立川市': 24, '三鷹市': 25, '府中市': 26,
-        '調布市': 27, '町田市': 28, '日野市': 29, '国分寺市': 30, '小金井市': 31
-    })
+    city_mapping = config.get('city_mapping', {})
     city_encoded = city_mapping.get(city, 0)
 
-    # 特征列表 (12个原有特征 - 与v1模型兼容)
+    # 特征列表 (21个特征 - V2模型格式)
+    # 顺序必须与model_config_v2.json中的feature_cols一致
     features = [
-        rent, area_sqm, built_year, walk_minutes,
-        city_encoded, heat_level, rent_per_sqm, age,
-        walk_level, plan_type, rent_level, area_level
+        rent, area_sqm, built_year, walk_minutes, management_fee,
+        total_rent, deposit, key_money, initial_cost,
+        zero_deposit, zero_key_money,
+        rent_per_sqm, total_rent_per_sqm, age,
+        city_encoded, heat_level, walk_level,
+        plan_type, building_type, rent_level, area_level
     ]
 
     return features
@@ -466,7 +486,7 @@ def main():
                 if bukken_number:
                     bukken_map[bukken_number] = page_id
 
-    bukken_list = list(bukken_map.items())[:200]
+    bukken_list = list(bukken_map.items())  # 处理所有未评分物件
     print(f"未评分物件: {len(bukken_map)} 个, 本次处理: {len(bukken_list)} 个")
 
     # 启动爬虫
@@ -517,7 +537,7 @@ def main():
                 # 更新Notion
                 try:
                     update_props = {
-                        "予測_反響数": {"number": data['predicted_response']}
+                        "予測_view数": {"number": data['predicted_response']}
                     }
 
                     if data.get('rent'):

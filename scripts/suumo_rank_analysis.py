@@ -8,9 +8,14 @@ import sys
 import time
 import re
 import math
+import csv
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(r"D:\Fango Ads")
+
+# 条件记录文件
+CONDITIONS_FILE = "Conditions.csv"
 
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
@@ -51,6 +56,42 @@ def update_notion_rank(page_id, rank_data):
     except Exception as e:
         print(f"    Notion更新失败: {e}")
         return False
+
+
+def log_search_condition(prop, rank_data, stations_searched):
+    """记录搜索条件到CSV文件"""
+    file_exists = os.path.exists(CONDITIONS_FILE)
+
+    with open(CONDITIONS_FILE, 'a', newline='', encoding='utf-8-sig') as f:
+        fieldnames = [
+            'search_time', 'reins_id', 'score', 'rent', 'area', 'walk',
+            'railway', 'station', 'stations_searched', 'floor_plan',
+            'price_upper', 'walk_tier', 'area_tier',
+            'rank', 'total_properties', 'percentile'
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow({
+            'search_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'reins_id': prop.get('reins_id', ''),
+            'score': prop.get('score', ''),
+            'rent': prop.get('rent', ''),
+            'area': prop.get('area', ''),
+            'walk': prop.get('walk', ''),
+            'railway': prop.get('railway', ''),
+            'station': prop.get('station', ''),
+            'stations_searched': '/'.join(stations_searched) if stations_searched else '',
+            'floor_plan': prop.get('floor_plan', ''),
+            'price_upper': rank_data.get('price_upper', '') if rank_data else '',
+            'walk_tier': rank_data.get('walk_tier', '') if rank_data else '',
+            'area_tier': rank_data.get('area_tier', '') if rank_data else '',
+            'rank': rank_data.get('rank', '') if rank_data else '',
+            'total_properties': rank_data.get('total_properties', '') if rank_data else '',
+            'percentile': rank_data.get('percentile', '') if rank_data else ''
+        })
 
 
 # 沿线车站顺序映射（用于获取前后站）
@@ -206,12 +247,15 @@ def get_high_score_properties(min_score=7.0):
 
 
 def analyze_market_rank(page, prop):
-    """在SUUMO上分析市场排名 - 通过手动导航"""
+    """在SUUMO上分析市场排名 - 通过手动导航
+    返回: (rank_data, stations_searched) 元组
+    """
     rent = prop.get("rent", 0)
     area = prop.get("area", 0)
     walk = prop.get("walk", 10)
     station = prop.get("station", "")
     railway = prop.get("railway", "")
+    stations_searched = []  # 记录搜索的车站
 
     # 计算筛选条件
     price_upper = get_price_upper_limit(rent)
@@ -279,6 +323,7 @@ def analyze_market_rank(page, prop):
                 if station_checkbox.count() > 0:
                     try:
                         station_checkbox.click()
+                        stations_searched.append(st)  # 记录搜索的车站
                         selected_count += 1
                         time.sleep(0.5)
                     except:
@@ -404,7 +449,7 @@ def analyze_market_rank(page, prop):
             rank = cheaper_count + 1
             percentile = (cheaper_count / total) * 100 if total > 0 else 0
 
-            return {
+            rank_data = {
                 "total_properties": total,
                 "rank": rank,
                 "percentile": round(percentile, 1),
@@ -415,12 +460,13 @@ def analyze_market_rank(page, prop):
                 "walk_tier": walk_tier,
                 "area_tier": area_tier
             }
+            return rank_data, stations_searched
 
-        return None
+        return None, stations_searched
 
     except Exception as e:
         print(f"  分析错误: {e}")
-        return None
+        return None, stations_searched
 
 
 def main():
@@ -457,7 +503,11 @@ def main():
             print(f"  得分: {prop['score']}, 租金: ¥{prop['rent']:,}")
             print(f"  沿线: {prop.get('railway', 'N/A')}, 车站: {prop.get('station', 'N/A')}")
 
-            rank_data = analyze_market_rank(page, prop)
+            rank_data, stations_searched = analyze_market_rank(page, prop)
+
+            # 记录搜索条件到CSV
+            log_search_condition(prop, rank_data, stations_searched)
+            print(f"    ✓ 已记录搜索条件到 {CONDITIONS_FILE}")
 
             if rank_data:
                 filters = [f"≤{rank_data.get('price_upper')}万"]
