@@ -34,8 +34,8 @@ with open("models/inquiry_model_config.json", "r") as f:
     config = json.load(f)
 
 
-def fetch_high_score_properties():
-    """获取予測_view数 >= 7的物件"""
+def fetch_high_score_properties(min_view=7):
+    """获取予測_view数 >= min_view的物件"""
     url = f"https://api.notion.com/v1/databases/{TARGET_DATABASE_ID}/query"
     all_results = []
     has_more = True
@@ -47,7 +47,41 @@ def fetch_high_score_properties():
             "filter": {
                 "property": "予測_view数",
                 "number": {
-                    "greater_than_or_equal_to": 7
+                    "greater_than_or_equal_to": min_view
+                }
+            }
+        }
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        response = requests.post(url, headers=notion_headers, json=payload, timeout=30)
+        data = response.json()
+
+        if "results" in data:
+            all_results.extend(data["results"])
+            has_more = data.get("has_more", False)
+            start_cursor = data.get("next_cursor")
+        else:
+            print(f"Error: {data}")
+            break
+
+    return all_results
+
+
+def fetch_properties_without_inquiry():
+    """获取没有予測_反響数的物件"""
+    url = f"https://api.notion.com/v1/databases/{TARGET_DATABASE_ID}/query"
+    all_results = []
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+        payload = {
+            "page_size": 100,
+            "filter": {
+                "property": "予測_反響数",
+                "number": {
+                    "is_empty": True
                 }
             }
         }
@@ -208,7 +242,7 @@ def predict_inquiry(data):
     return result
 
 
-def update_notion_inquiry(page_id, inquiry_count):
+def update_notion_inquiry(page_id, inquiry_count, max_retries=3):
     """更新Notion的予測_反響数"""
     url = f"https://api.notion.com/v1/pages/{page_id}"
     data = {
@@ -216,18 +250,29 @@ def update_notion_inquiry(page_id, inquiry_count):
             "予測_反響数": {"number": inquiry_count}
         }
     }
-    response = requests.patch(url, headers=notion_headers, json=data, timeout=30)
-    return response.status_code == 200
+    for attempt in range(max_retries):
+        try:
+            response = requests.patch(url, headers=notion_headers, json=data, timeout=60)
+            return response.status_code == 200
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                print(f"   超时，重试 {attempt + 2}/{max_retries}...")
+                import time
+                time.sleep(2)
+            else:
+                print(f"   超时，已重试{max_retries}次")
+                return False
+    return False
 
 
 def main():
     print("=" * 60)
-    print("預測問合せ数（反響数）")
+    print("預測問合せ数（反響数）- JDS")
     print("=" * 60)
 
-    # 获取7分以上物件
-    print("\n1. 获取予測_view数 >= 7的物件...")
-    pages = fetch_high_score_properties()
+    # 获取没有予測_反響数的物件
+    print("\n1. 获取没有予測_反響数的物件...")
+    pages = fetch_properties_without_inquiry()
     print(f"   获取到 {len(pages)} 个物件")
 
     if not pages:
