@@ -38,6 +38,22 @@ NOTION_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
 # 筛选阈值
 SCORE_THRESHOLD = 3.0
 
+# 加载広告不可管理会社列表
+BLACKLIST_COMPANIES = []
+try:
+    import csv
+    with open("funt IDpass - 千代田区　管理会社.csv", "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        next(reader)  # 跳过标题行
+        for row in reader:
+            if len(row) >= 4 and row[3] == "不可":
+                company_name = row[1].strip()
+                if company_name:
+                    BLACKLIST_COMPANIES.append(company_name)
+    print(f"已加载 {len(BLACKLIST_COMPANIES)} 个広告不可管理会社")
+except Exception as e:
+    print(f"加载管理会社黑名单失败: {e}")
+
 # 加载V2模型
 with open("models/xgboost_regressor_v2.pkl", "rb") as f:
     model = pickle.load(f)
@@ -245,6 +261,7 @@ class ReinsScraper:
                 text = self.page.locator('body').inner_text()
                 detail_data = {}
 
+
                 # 提取完整所在地 (必须包含都道府県)
                 m = re.search(r'所在地[：:\s]*(東京都[^\n\t]+)', text)
                 if not m:
@@ -300,6 +317,32 @@ class ReinsScraper:
                 m = re.search(r'構造[：:\s]*([^\n\s]+)', text)
                 if m:
                     detail_data['structure'] = m.group(1).strip()
+
+                # 提取管理会社 - 搜索多种模式
+                company = None
+
+                # 1. 匹配"商号"字段 (REINS详细页面中的公司名)
+                m = re.search(r'商号\s*\n\s*([^\n]+)', text)
+
+                # 2. 匹配"会員情報"区域内的公司名
+                if not m:
+                    m = re.search(r'会員情報[^\n]*商号[：:\s\n]*([^\n]+)', text)
+
+                # 3. 直接匹配"管理会社"后面跟着公司名
+                if not m:
+                    m = re.search(r'管理会社[：:\s]+([^\n\t]+(?:株式会社|（株）|㈱)[^\n\t]*)', text)
+
+                if m:
+                    company = m.group(1).strip()
+                    # 排除无效的值 (不包含'ー'因为常用于公司名)
+                    invalid_values = ['なし', '無', '自社管理欄', '賃貸物件管理',
+                                     '配分割合', '負担割合', '取引態様', '代表電話番号']
+                    # 排除仅为符号的情况
+                    if company in ['ー', '-', '–', '—']:
+                        company = None
+                    if company and not any(inv in company for inv in invalid_values):
+                        detail_data['management_company'] = company
+                        print(f"    管理会社: {company}")
 
                 # 返回搜索页面
                 self.page.go_back()
@@ -580,6 +623,20 @@ def main():
                     if '千代田' in address and rent_man <= 5:
                         update_props["広告可"] = {"select": {"name": "不可（物件）"}}
                         print(f"  ⚠ 标记为広告不可（千代田区 ¥{rent_man}万 疑似share house）")
+
+                    # 检查管理会社是否在黑名单
+                    management_company = data.get('management_company', '')
+                    if management_company:
+                        # 写入管理会社列
+                        update_props["管理会社"] = {"rich_text": [{"text": {"content": management_company}}]}
+
+                        # 检查是否在黑名单
+                        if "広告可" not in update_props:
+                            for blacklisted in BLACKLIST_COMPANIES:
+                                if blacklisted in management_company or management_company in blacklisted:
+                                    update_props["広告可"] = {"select": {"name": "不可（仲介）"}}
+                                    print(f"  ⚠ 标记为広告不可（管理会社: {management_company}）")
+                                    break
 
                     result = notion.update_page(page_id, update_props)
                     if "id" in result:
