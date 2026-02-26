@@ -240,9 +240,9 @@ def main():
     print(f"   成功更新 {success}/{len(filtered)} 个物件")
 
     # 输出详细信息
-    print(f"\n6. TOP 5 详细信息:")
+    print(f"\n6. TOP 6 详细信息:")
     print("=" * 70)
-    for i, prop in enumerate(filtered[:5]):
+    for i, prop in enumerate(filtered[:6]):
         print(f"\n【第{i+1}名】{prop.get('reins_id', 'N/A')}")
         print(f"  综合得分: {prop.get('total_score', 0):.1f}")
         print(f"  予測view数: {prop.get('view_score', 0):.1f}")
@@ -253,6 +253,69 @@ def main():
         print(f"  所在地: {prop.get('address', 'N/A')}")
         print(f"  管理会社: {prop.get('management_company', 'N/A')}")
         print(f"  広告可: {prop.get('ad_status') or '未設定'}")
+
+    # 生成TOP 6推荐md文件
+    print(f"\n7. 生成推荐报告...")
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    md_content = f"""# 物件推薦レポート
+
+**生成日時**: {now}
+
+## TOP 6 推薦物件
+
+| 順位 | REINS_ID | 推薦点数 | view予測 | 反響予測 | 広告数 | 賃料 | 面積 | 広告可 |
+|------|----------|----------|----------|----------|--------|------|------|--------|
+"""
+    for i, prop in enumerate(filtered[:6]):
+        reins_id = prop.get('reins_id', 'N/A')
+        total = prop.get('total_score', 0)
+        view = prop.get('view_score', 0) or 0
+        inquiry = prop.get('inquiry_score', 0) or 0
+        ad_count = prop.get('ad_count', '-')
+        rent = prop.get('rent', 0)
+        area = prop.get('area', 0)
+        ad_status = prop.get('ad_status') or '未設定'
+
+        md_content += f"| {i+1} | {reins_id} | {total:.1f} | {view:.1f} | {inquiry:.1f} | {ad_count} | ¥{rent:,.0f} | {area}㎡ | {ad_status} |\n"
+
+    md_content += """
+## 詳細情報
+
+"""
+    for i, prop in enumerate(filtered[:6]):
+        md_content += f"""### 第{i+1}位: {prop.get('reins_id', 'N/A')}
+
+- **推薦点数**: {prop.get('total_score', 0):.1f}
+- **予測view数**: {prop.get('view_score', 0):.1f}
+- **予測反響数**: {prop.get('inquiry_score', 0):.1f}
+- **広告数**: {prop.get('ad_count', 'N/A')}（競争得点: {prop.get('competition_score', 0):.1f}）
+- **賃料**: ¥{prop.get('rent', 0):,.0f}
+- **面積**: {prop.get('area', 0)}㎡
+- **所在地**: {prop.get('address', 'N/A')}
+- **管理会社**: {prop.get('management_company', 'N/A')}
+- **広告可**: {prop.get('ad_status') or '未設定'}
+
+---
+
+"""
+
+    md_content += """## 評価基準
+
+```
+推薦点数 = (予測view数 × 0.30) + (予測反響数 × 0.25) + (競争得点 × 0.25) + (市場得点 × 0.20)
+競争得点 = max(0, 10 - (広告数 - 1) × 0.5)
+```
+
+- 推薦点数が高いほど、広告効果が期待できます
+- 広告数が少ないほど競争が少なく有利です
+"""
+
+    with open('data/top_recommendations.md', 'w', encoding='utf-8') as f:
+        f.write(md_content)
+
+    print(f"   ✓ data/top_recommendations.md を生成しました")
 
     print(f"\n" + "=" * 70)
     print("完成!")

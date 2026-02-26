@@ -7,44 +7,123 @@
 | 预测view数 | 予測_view数 | SUUMO反響数 | SUUMO平台上的物件浏览/反响数据 |
 | 预测反响数 | 予測_反響数 | JDS問合せ数 | JDS系统中的咨询数（中介用语） |
 
-## 工作流程
-
-### 1. 预测view数（SUUMO反響数）
-
-**用户请求**: "预测view数" / "预测SUUMO反响"
-
-**操作步骤**:
-1. 查询Notion中`予測_view数`为空的物件
-2. 运行预测脚本 `scripts/predict_and_update_notion_v2.py`
-3. 更新Notion的`予測_view数`列
-
-**数据来源**: SUUMO平台反響数据
-
 ---
 
-### 2. 预测反响数（JDS問合せ数）
+## 新物件处理流程
 
-**用户请求**: "预测反响数" / "预测問合せ数"
+当有新物件加入时，按以下顺序处理：
 
-**操作步骤**:
-1. 查询Notion中`予測_反響数`为空的物件
-2. 运行预测脚本（需要指定JDS模型）
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. 预测view数                                               │
+│     脚本: predict_and_update_notion_v2.py                   │
+│     → 更新 予測_view数、管理会社                             │
+├─────────────────────────────────────────────────────────────┤
+│  2. 检查管理公司广告可否                                      │
+│     脚本: check_management_company.py                        │
+│     → 黑名单 → 不可（仲介）                                  │
+│     → 未知 → 確認待ち                                        │
+├─────────────────────────────────────────────────────────────┤
+│  3. 预测反响数（仅 view数 >= 6）                             │
+│     脚本: predict_inquiry.py                                 │
+│     → 更新 予測_反響数                                       │
+├─────────────────────────────────────────────────────────────┤
+│  4. 计算市场排名和广告数（仅 view数 >= 6）                   │
+│     脚本: suumo_rank_analysis.py                             │
+│     脚本: fix_missing_ad.py                                  │
+│     → 更新 広告数、市場順位                                  │
+├─────────────────────────────────────────────────────────────┤
+│  5. 计算推薦点数                                             │
+│     脚本: recommend_properties.py                            │
+│     → 更新 推薦点数                                          │
+│     → 输出 TOP 6 推荐物件到 data/top_recommendations.md      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 步骤详解
+
+#### Step 1: 预测view数（SUUMO反響数）
+
+**脚本**: `scripts/predict_and_update_notion_v2.py`
+
+**操作**:
+1. 查询Notion中`予測_view数`为空的物件
+2. 从REINS获取物件详细信息
+3. 使用XGBoost模型预测view数
+4. 同时提取管理会社信息
+5. 更新Notion
+
+#### Step 2: 检查管理公司广告可否
+
+**脚本**: `scripts/check_management_company.py`
+
+**操作**:
+1. 查询view数 >= 6且広告可为空的物件
+2. 检查管理会社是否在黑名单
+3. 黑名单 → 标记为「不可（仲介）」
+4. 未知 → 标记为「確認待ち」
+
+#### Step 3: 预测反响数（JDS問合せ数）
+
+**脚本**: `scripts/predict_inquiry.py`
+
+**条件**: 仅处理 予測_view数 >= 6 的物件
+
+**操作**:
+1. 查询`予測_反響数`为空的物件
+2. 使用inquiry_model预测反響数
 3. 更新Notion的`予測_反響数`列
 
-**数据来源**: JDS系统 問合せ数（咨询数）
+#### Step 4: 计算市场排名和广告数
+
+**脚本**:
+- `scripts/suumo_rank_analysis.py` - 市场排名
+- `scripts/fix_missing_ad.py` - 広告数
+
+**条件**: 仅处理 予測_view数 >= 6 的物件
+
+**操作**:
+1. 在SUUMO搜索同条件物件
+2. 计算目标物件的排名和百分位
+3. 统计広告数（有多少中介在推广）
+4. 更新Notion
+
+#### Step 5: 计算推薦点数
+
+**脚本**: `scripts/recommend_properties.py`
+
+**评分公式**:
+```
+推薦点数 = (予測_view数 × 0.30)
+         + (予測_反響数 × 0.25)
+         + (競争得分 × 0.25)
+         + (市場得分 × 0.20)
+
+競争得分 = max(0, 10 - (広告数 - 1) × 0.5)
+```
+
+**输出**:
+- 更新Notion的`推薦点数`列
+- 生成 `data/top_recommendations.md`（TOP 6推荐物件）
 
 ---
 
-## 相关脚本
+## 相关脚本一览
 
-| 脚本 | 用途 |
-|------|------|
-| `scripts/predict_and_update_notion_v2.py` | 预测view数（SUUMO） |
-| `scripts/fix_missing_ad.py` | 计算広告数 |
-| `scripts/suumo_rank_analysis.py` | SUUMO市场排名分析 |
+| 脚本 | 用途 | 条件 |
+|------|------|------|
+| `predict_and_update_notion_v2.py` | 预测view数、提取管理会社 | 全部新物件 |
+| `check_management_company.py` | 检查管理公司广告可否 | view数 >= 6 |
+| `predict_inquiry.py` | 预测反響数（JDS） | view数 >= 6 |
+| `suumo_rank_analysis.py` | SUUMO市场排名分析 | view数 >= 6 |
+| `fix_missing_ad.py` | 计算広告数 | view数 >= 6 |
+| `recommend_properties.py` | 综合评分推荐 | view数 >= 6 |
+
+---
 
 ## 备注
 
 - 中介习惯用"反響数"指代JDS的問合せ数
 - "view数"通常指SUUMO平台的数据
 - 两个预测模型基于不同数据源训练，预测目标不同
+- 推薦点数越高，越适合进行广告投放
