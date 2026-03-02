@@ -677,6 +677,13 @@ def main():
             df.to_csv('data/notion_predictions_v2.csv', index=False, encoding='utf-8-sig')
             print(f"结果已保存: data/notion_predictions_v2.csv")
 
+            # 保存本次处理的新物件ID到缓存（供后续步骤使用）
+            new_ids = [r.get('reins_id') for r in results if r.get('reins_id')]
+            cache_file = 'data/new_properties_cache.txt'
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(new_ids))
+            print(f"新物件缓存已保存: {cache_file} ({len(new_ids)}个)")
+
     except Exception as e:
         print(f"错误: {e}")
         import traceback

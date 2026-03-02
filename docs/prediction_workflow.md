@@ -121,6 +121,55 @@
 
 ---
 
+## 自动触发器
+
+### 启动监控服务
+
+双击 `start_workflow_monitor.bat` 或运行：
+```bash
+python scripts/workflow_trigger.py
+```
+
+### 触发方式
+
+监控服务启动后，以下方式可触发Workflow自动执行：
+
+**方式1: 调用bat脚本**
+```bash
+trigger\trigger_workflow.bat
+```
+
+**方式2: Python调用**
+```python
+from trigger.trigger_workflow import trigger_workflow
+trigger_workflow("新物件已更新")
+```
+
+**方式3: 直接修改flag文件**
+```bash
+echo "trigger" >> trigger\run_workflow.flag
+```
+
+### 文件结构
+
+```
+trigger/
+├── run_workflow.flag      # 监控文件（修改此文件触发workflow）
+├── trigger_workflow.bat   # Windows触发脚本
+└── trigger_workflow.py    # Python触发脚本
+
+logs/
+└── workflow_trigger.log   # 执行日志
+```
+
+### 注意事项
+
+- 触发后有30秒冷却时间，避免重复执行
+- Workflow正在执行时，新的触发会被忽略
+- 执行日志保存在 `logs/workflow_trigger.log`
+
+---
+
 ## 备注
 
 - 中介习惯用"反響数"指代JDS的問合せ数
