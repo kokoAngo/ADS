@@ -8,7 +8,7 @@ import time
 import re
 import math
 import requests
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from dotenv import load_dotenv
 
 # 设置工作目录
@@ -79,7 +79,7 @@ def get_neighboring_stations(railway, station):
     return neighbors
 
 
-def get_properties_without_ad_count(min_score=6.0):
+def get_properties_without_ad_count(min_score=4.0):
     """从Notion获取没有広告数的物件"""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     data = {
@@ -166,7 +166,7 @@ def main():
     print("=" * 60)
 
     print("\n获取没有広告数的物件...")
-    properties = get_properties_without_ad_count(min_score=6.0)
+    properties = get_properties_without_ad_count(min_score=4.0)
     print(f'找到 {len(properties)} 个缺失広告数的物件')
 
     if not properties:
@@ -183,171 +183,258 @@ def main():
 
     print("\n启动浏览器...")
 
+    success_count = 0
+    failed_properties = []
+
     for i, prop in enumerate(properties):
         print(f'\n[{i+1}/{len(properties)}] {prop["reins_id"]}')
         print(f'  得分: {prop.get("score", "N/A")}, 租金: ¥{prop["rent"]:,}, 面积: {prop["area_sqm"]}㎡')
 
-        railway = prop['railway']
-        station = prop['station']
-        rent = prop['rent']
-        area = prop['area_sqm']
-        walk = prop.get('walk_minutes', 10)
+        try:
+            railway = prop['railway']
+            station = prop['station']
+            rent = prop['rent']
+            area = prop['area_sqm']
+            walk = prop.get('walk_minutes', 10)
 
-        price_upper = get_price_upper_limit(rent)
-        walk_tier = get_walk_tier(walk)
-        area_tier = get_area_tier(area)
-        neighboring_stations = get_neighboring_stations(railway, station)
+            # 检查是否有有效的沿线和车站信息
+            if not railway or not station:
+                print(f'  ✗ 缺少沿线或车站信息，跳过')
+                failed_properties.append(prop["reins_id"])
+                continue
 
-        print(f'  沿线: {railway}, 车站: {station}')
-        print(f'  搜索范围: {" / ".join(neighboring_stations)}')
-        print(f'  筛选: ≤{price_upper}万, 徒步≤{walk_tier}分' + (f', 面积≥{area_tier}㎡' if area_tier else ''))
+            price_upper = get_price_upper_limit(rent)
+            walk_tier = get_walk_tier(walk)
+            area_tier = get_area_tier(area)
+            neighboring_stations = get_neighboring_stations(railway, station)
 
-        # 搜索
-        page.goto('https://suumo.jp/chintai/tokyo/')
-        time.sleep(2)
-        page.click('a:has-text("沿線・駅から探す")')
-        time.sleep(2)
+            print(f'  沿线: {railway}, 车站: {station}')
+            print(f'  搜索范围: {" / ".join(neighboring_stations)}')
+            print(f'  筛选: ≤{price_upper}万, 徒步≤{walk_tier}分' + (f', 面积≥{area_tier}㎡' if area_tier else ''))
 
-        # 点击沿线
-        railway_short = railway.replace("線", "").replace("東京メトロ", "").strip()
-        line_checkbox = page.locator(f'label:has-text("{railway}")').first
-        if line_checkbox.count() == 0:
-            line_checkbox = page.locator(f'label:has-text("{railway_short}")').first
-        if line_checkbox.count() > 0:
-            line_checkbox.click()
-        time.sleep(1)
+            # 搜索 - 带重试逻辑
+            max_retries = 2
+            search_success = False
 
-        for st in neighboring_stations:
-            try:
-                page.click(f'label:has-text("{st}")')
-                time.sleep(0.3)
-            except:
-                pass
+            for retry in range(max_retries):
+                try:
+                    page.goto('https://suumo.jp/chintai/tokyo/', timeout=30000)
+                    time.sleep(2)
+                    page.click('a:has-text("沿線・駅から探す")', timeout=10000)
+                    time.sleep(2)
 
-        page.click('a:has-text("この条件で検索する")')
-        time.sleep(3)
+                    # 点击沿线
+                    railway_short = railway.replace("線", "").replace("東京メトロ", "").strip()
+                    line_checkbox = page.locator(f'label:has-text("{railway}")').first
+                    if line_checkbox.count() == 0:
+                        line_checkbox = page.locator(f'label:has-text("{railway_short}")').first
+                    if line_checkbox.count() > 0:
+                        line_checkbox.click(timeout=10000)
+                    else:
+                        print(f'  ✗ 找不到沿线: {railway}')
+                        break
+                    time.sleep(1)
 
-        # 设置条件
-        if price_upper == int(price_upper):
-            price_text = f'{int(price_upper)}万円'
-        else:
-            price_text = f'{price_upper}万円'
+                    # 点击车站
+                    stations_clicked = 0
+                    for st in neighboring_stations:
+                        try:
+                            page.click(f'label:has-text("{st}")', timeout=5000)
+                            stations_clicked += 1
+                            time.sleep(0.3)
+                        except PlaywrightTimeoutError:
+                            pass
+                        except Exception:
+                            pass
 
-        ct = page.locator('select[name="ct"]').first
-        if ct.count() > 0:
-            opts = ct.locator('option').all()
-            for opt in opts:
-                if price_text in opt.inner_text():
-                    ct.select_option(label=opt.inner_text())
-                    break
-
-        et = page.locator('select[name="et"]').first
-        if et.count() > 0:
-            opts = et.locator('option').all()
-            for opt in opts:
-                if f'{walk_tier}分' in opt.inner_text():
-                    et.select_option(label=opt.inner_text())
-                    break
-
-        if area_tier:
-            mb = page.locator('select[name="mb"]').first
-            if mb.count() > 0:
-                opts = mb.locator('option').all()
-                for opt in opts:
-                    if f'{area_tier}m' in opt.inner_text():
-                        mb.select_option(label=opt.inner_text())
+                    if stations_clicked == 0:
+                        print(f'  ✗ 未能选中任何车站')
                         break
 
-        page.click('a:has-text("検索する")')
-        time.sleep(3)
-
-        # 搜索広告数 - 翻页查找
-        rent_man = rent / 10000
-        ad_count = None
-
-        for page_num in range(5):  # 最多检查5页
-            if page_num > 0:
-                next_btn = page.locator('a:has-text("次へ")').first
-                if next_btn.count() > 0:
-                    next_btn.click()
-                    time.sleep(2)
-                else:
+                    # 点击搜索按钮
+                    page.click('a:has-text("この条件で検索する")', timeout=15000)
+                    time.sleep(3)
+                    search_success = True
                     break
 
-            casettes = page.locator('.cassetteitem').all()
+                except PlaywrightTimeoutError as e:
+                    if retry < max_retries - 1:
+                        print(f'  ! 超时，重试 ({retry + 1}/{max_retries})...')
+                        time.sleep(2)
+                    else:
+                        print(f'  ✗ 搜索超时: {str(e)[:50]}')
+                except Exception as e:
+                    if retry < max_retries - 1:
+                        print(f'  ! 错误，重试 ({retry + 1}/{max_retries})...')
+                        time.sleep(2)
+                    else:
+                        print(f'  ✗ 搜索失败: {str(e)[:50]}')
 
-            for casette in casettes:
+            if not search_success:
+                failed_properties.append(prop["reins_id"])
+                continue
+
+            # 设置条件
+            if price_upper == int(price_upper):
+                price_text = f'{int(price_upper)}万円'
+            else:
+                price_text = f'{price_upper}万円'
+
+            try:
+                ct = page.locator('select[name="ct"]').first
+                if ct.count() > 0:
+                    opts = ct.locator('option').all()
+                    for opt in opts:
+                        if price_text in opt.inner_text():
+                            ct.select_option(label=opt.inner_text())
+                            break
+
+                et = page.locator('select[name="et"]').first
+                if et.count() > 0:
+                    opts = et.locator('option').all()
+                    for opt in opts:
+                        if f'{walk_tier}分' in opt.inner_text():
+                            et.select_option(label=opt.inner_text())
+                            break
+
+                if area_tier:
+                    mb = page.locator('select[name="mb"]').first
+                    if mb.count() > 0:
+                        opts = mb.locator('option').all()
+                        for opt in opts:
+                            if f'{area_tier}m' in opt.inner_text():
+                                mb.select_option(label=opt.inner_text())
+                                break
+
+                page.click('a:has-text("検索する")', timeout=15000)
+                time.sleep(3)
+            except PlaywrightTimeoutError:
+                print(f'  ✗ 设置筛选条件超时')
+                failed_properties.append(prop["reins_id"])
+                continue
+            except Exception as e:
+                print(f'  ✗ 设置筛选条件失败: {str(e)[:50]}')
+                failed_properties.append(prop["reins_id"])
+                continue
+
+            # 搜索広告数 - 翻页查找
+            rent_man = rent / 10000
+            ad_count = None
+            page_num = 0
+
+            for page_num in range(5):  # 最多检查5页
                 try:
-                    rent_elem = casette.locator('.cassetteitem_price--rent').first
-                    if rent_elem.count() == 0:
-                        continue
-                    rent_text = rent_elem.inner_text()
+                    if page_num > 0:
+                        next_btn = page.locator('a:has-text("次へ")').first
+                        if next_btn.count() > 0:
+                            next_btn.click(timeout=10000)
+                            time.sleep(2)
+                        else:
+                            break
 
-                    rent_match = re.search(r'(\d+(?:\.\d+)?)\s*万', rent_text)
-                    if not rent_match:
-                        continue
+                    casettes = page.locator('.cassetteitem').all()
 
-                    casette_rent = float(rent_match.group(1))
-                    if abs(casette_rent - rent_man) > 0.2:
-                        continue
+                    for casette in casettes:
+                        try:
+                            rent_elem = casette.locator('.cassetteitem_price--rent').first
+                            if rent_elem.count() == 0:
+                                continue
+                            rent_text = rent_elem.inner_text()
 
-                    area_elem = casette.locator('.cassetteitem_menseki').first
-                    if area_elem.count() > 0:
-                        area_text = area_elem.inner_text()
-                        area_match = re.search(r'(\d+(?:\.\d+)?)', area_text)
-                        if area_match:
-                            casette_area = float(area_match.group(1))
-                            if abs(casette_area - area) > 2:
+                            rent_match = re.search(r'(\d+(?:\.\d+)?)\s*万', rent_text)
+                            if not rent_match:
                                 continue
 
-                    # 找到匹配，获取详情
-                    detail_links = casette.locator('a').all()
-                    for link in detail_links:
-                        href = link.get_attribute('href') or ''
-                        if '/chintai/' in href and 'jnc_' in href:
-                            full_url = 'https://suumo.jp' + href if href.startswith('/') else href
+                            casette_rent = float(rent_match.group(1))
+                            if abs(casette_rent - rent_man) > 0.2:
+                                continue
 
-                            detail_page = context.new_page()
-                            detail_page.goto(full_url, timeout=30000)
-                            time.sleep(2)
+                            area_elem = casette.locator('.cassetteitem_menseki').first
+                            if area_elem.count() > 0:
+                                area_text = area_elem.inner_text()
+                                area_match = re.search(r'(\d+(?:\.\d+)?)', area_text)
+                                if area_match:
+                                    casette_area = float(area_match.group(1))
+                                    if abs(casette_area - area) > 2:
+                                        continue
 
-                            html = detail_page.content()
-                            other_count = 0
-                            match = re.search(r'他の店舗が(\d+)店', html)
-                            if match:
-                                other_count = int(match.group(1))
+                            # 找到匹配，获取详情
+                            detail_links = casette.locator('a').all()
+                            for link in detail_links:
+                                href = link.get_attribute('href') or ''
+                                if '/chintai/' in href and 'jnc_' in href:
+                                    full_url = 'https://suumo.jp' + href if href.startswith('/') else href
 
-                            ad_count = 1 + other_count
-                            detail_page.close()
+                                    detail_page = context.new_page()
+                                    try:
+                                        detail_page.goto(full_url, timeout=30000)
+                                        time.sleep(2)
 
-                            print(f'  ✓ 找到(第{page_num+1}页)，広告数: {ad_count}')
-                            break
+                                        html = detail_page.content()
+                                        other_count = 0
+                                        match = re.search(r'他の店舗が(\d+)店', html)
+                                        if match:
+                                            other_count = int(match.group(1))
+
+                                        ad_count = 1 + other_count
+                                        print(f'  ✓ 找到(第{page_num+1}页)，広告数: {ad_count}')
+                                    except Exception as e:
+                                        print(f'  ! 详情页面加载失败: {str(e)[:30]}')
+                                    finally:
+                                        detail_page.close()
+                                    break
+
+                            if ad_count:
+                                break
+                        except:
+                            continue
 
                     if ad_count:
                         break
-                except:
-                    continue
+                except PlaywrightTimeoutError:
+                    print(f'  ! 翻页超时，停止搜索')
+                    break
+                except Exception:
+                    break
 
             if ad_count:
-                break
-
-        if ad_count:
-            # 更新Notion
-            url = f'https://api.notion.com/v1/pages/{prop["page_id"]}'
-            data = {'properties': {'広告数': {'number': ad_count}}}
-            response = requests.patch(url, headers=notion_headers, json=data, timeout=30)
-            if response.status_code == 200:
-                print(f'  ✓ 已更新Notion')
+                # 更新Notion
+                url = f'https://api.notion.com/v1/pages/{prop["page_id"]}'
+                data = {'properties': {'広告数': {'number': ad_count}}}
+                response = requests.patch(url, headers=notion_headers, json=data, timeout=30)
+                if response.status_code == 200:
+                    print(f'  ✓ 已更新Notion')
+                    success_count += 1
+                else:
+                    print(f'  ✗ Notion更新失败')
+                    failed_properties.append(prop["reins_id"])
             else:
-                print(f'  ✗ 更新失败')
-        else:
-            print(f'  ✗ 未找到匹配物件(检查了{page_num+1}页)')
+                print(f'  ✗ 未找到匹配物件(检查了{page_num+1}页)')
 
-        time.sleep(2)
+            time.sleep(2)
+
+        except PlaywrightTimeoutError as e:
+            print(f'  ✗ 处理超时: {str(e)[:50]}')
+            failed_properties.append(prop["reins_id"])
+            continue
+        except Exception as e:
+            print(f'  ✗ 处理失败: {str(e)[:50]}')
+            failed_properties.append(prop["reins_id"])
+            continue
 
     browser.close()
     playwright.stop()
-    print('\n完成')
+
+    print('\n' + '=' * 60)
+    print(f'完成!')
+    print(f'  成功: {success_count}/{len(properties)}')
+    if failed_properties:
+        print(f'  失败: {len(failed_properties)} 个')
+        for fid in failed_properties[:10]:
+            print(f'    - {fid}')
+        if len(failed_properties) > 10:
+            print(f'    ... 还有 {len(failed_properties) - 10} 个')
+    print('=' * 60)
 
 if __name__ == "__main__":
     main()

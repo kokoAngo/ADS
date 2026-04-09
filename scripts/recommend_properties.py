@@ -27,23 +27,61 @@ WEIGHTS = {
 }
 
 # 筛选阈值
-MIN_VIEW_SCORE = 6.0
+MIN_VIEW_SCORE = 4.0
 
 
-def fetch_all_properties():
-    """获取所有物件"""
+def fetch_all_properties(only_missing_score=True):
+    """获取物件
+
+    Args:
+        only_missing_score: True=只获取没有推薦点数的物件, False=获取所有物件
+    """
+    import time
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     all_results = []
     has_more = True
     start_cursor = None
+    max_retries = 3
 
     while has_more:
         payload = {"page_size": 100}
+
+        # 只获取需要计算得分的物件（没有推薦点数 且 view>=4）
+        if only_missing_score:
+            payload["filter"] = {
+                "and": [
+                    {"property": "推薦点数", "number": {"is_empty": True}},
+                    {"property": "予測_view数", "number": {"greater_than_or_equal_to": MIN_VIEW_SCORE}}
+                ]
+            }
+
         if start_cursor:
             payload["start_cursor"] = start_cursor
 
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        data = response.json()
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
+
+                # Check for rate limiting
+                if response.status_code == 429:
+                    wait_time = int(response.headers.get('Retry-After', 5))
+                    print(f"  Rate limited, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                # Check for empty response
+                if not response.text:
+                    print(f"  Empty response, retrying ({attempt+1}/{max_retries})...")
+                    time.sleep(2)
+                    continue
+
+                data = response.json()
+                break
+            except Exception as e:
+                print(f"  Request error: {e}, retrying ({attempt+1}/{max_retries})...")
+                time.sleep(2)
+                if attempt == max_retries - 1:
+                    raise
 
         if "results" in data:
             all_results.extend(data["results"])
@@ -159,10 +197,10 @@ def main():
     print("物件综合评分推荐系统")
     print("=" * 70)
 
-    # 获取所有物件
-    print("\n1. 获取物件数据...")
-    pages = fetch_all_properties()
-    print(f"   共 {len(pages)} 个物件")
+    # 获取需要计算得分的物件（没有推薦点数的）
+    print("\n1. 获取需要计算得分的物件（推薦点数为空 且 view>=4）...")
+    pages = fetch_all_properties(only_missing_score=True)
+    print(f"   共 {len(pages)} 个物件需要计算")
 
     # 提取数据
     properties = []

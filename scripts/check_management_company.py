@@ -1,12 +1,14 @@
 """
-检查6分以上物件的管理会社
+检查4分以上物件的管理会社
 - 黑名单管理会社 → 標記为不可（仲介）
+- 白名单管理会社 → 標記为可
 - 未知管理会社 → 標記为確認待ち
 """
 import os
 import sys
 import csv
 import requests
+from pathlib import Path
 from dotenv import load_dotenv
 
 os.chdir(r"D:\Fango Ads")
@@ -21,24 +23,72 @@ headers = {
     'Notion-Version': '2022-06-28'
 }
 
-# 加载黑名单
-BLACKLIST_COMPANIES = []
-try:
-    with open("funt IDpass - 千代田区　管理会社.csv", "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        next(reader)
-        for row in reader:
-            if len(row) >= 4 and row[3] == "不可":
-                company_name = row[1].strip()
-                if company_name:
-                    BLACKLIST_COMPANIES.append(company_name)
-    print(f"已加载 {len(BLACKLIST_COMPANIES)} 个黑名单管理会社")
-except Exception as e:
-    print(f"加载黑名单失败: {e}")
+# 数据文件路径
+DATA_DIR = Path(__file__).parent.parent / "data"
+BLACKLIST_FILE = DATA_DIR / "blacklist_companies.txt"
+WHITELIST_FILE = DATA_DIR / "whitelist_companies.txt"
+FULL_DATA_FILE = DATA_DIR / "management_companies.csv"
 
 
-def get_high_score_properties(min_score=6.0):
-    """获取6分以上且有管理会社但広告可为空的物件"""
+def load_company_lists():
+    """加载黑白名单和完整数据"""
+    blacklist = set()
+    whitelist = set()
+    case_by_case = set()  # 物件による
+    all_companies = {}  # 完整数据
+
+    # 加载黑名单
+    if BLACKLIST_FILE.exists():
+        with open(BLACKLIST_FILE, 'r', encoding='utf-8') as f:
+            blacklist = {line.strip() for line in f if line.strip()}
+        print(f"黑名单: {len(blacklist)} 家")
+
+    # 加载白名单
+    if WHITELIST_FILE.exists():
+        with open(WHITELIST_FILE, 'r', encoding='utf-8') as f:
+            whitelist = {line.strip() for line in f if line.strip()}
+        print(f"白名单: {len(whitelist)} 家")
+
+    # 加载完整数据（用于匹配"物件による"等状态）
+    if FULL_DATA_FILE.exists():
+        with open(FULL_DATA_FILE, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                company = row.get("管理会社名", "").strip()
+                status = row.get("広告可否", "").strip()
+                if company:
+                    all_companies[company] = status
+                    if status == "物件による":
+                        case_by_case.add(company)
+        print(f"物件による: {len(case_by_case)} 家")
+        print(f"总计: {len(all_companies)} 家管理公司")
+
+    return blacklist, whitelist, case_by_case, all_companies
+
+
+def match_company(company_name, company_set):
+    """模糊匹配公司名称"""
+    if not company_name:
+        return None
+
+    # 精确匹配
+    if company_name in company_set:
+        return company_name
+
+    # 包含匹配
+    for known in company_set:
+        # 去除常见后缀进行比较
+        name1 = company_name.replace("（株）", "").replace("(株)", "").replace("株式会社", "").strip()
+        name2 = known.replace("（株）", "").replace("(株)", "").replace("株式会社", "").strip()
+
+        if name1 in name2 or name2 in name1:
+            return known
+
+    return None
+
+
+def get_high_score_properties(min_score=4.0):
+    """获取4分以上且有管理会社但広告可为空的物件"""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     all_results = []
     has_more = True
@@ -72,7 +122,7 @@ def get_high_score_properties(min_score=6.0):
     return all_results
 
 
-def update_ad_status(page_id, status, company_name):
+def update_ad_status(page_id, status):
     """更新広告可状态"""
     url = f"https://api.notion.com/v1/pages/{page_id}"
     data = {
@@ -86,11 +136,15 @@ def update_ad_status(page_id, status, company_name):
 
 def main():
     print("=" * 60)
-    print("检查6分以上物件的管理会社")
+    print("检查4分以上物件的管理会社")
     print("=" * 60)
 
+    # 加载公司列表
+    print("\n加载管理公司数据...")
+    blacklist, whitelist, case_by_case, all_companies = load_company_lists()
+
     # 获取物件
-    print("\n获取6分以上且広告可为空的物件...")
+    print("\n获取4分以上且広告可为空的物件...")
     pages = get_high_score_properties()
     print(f"找到 {len(pages)} 个物件需要检查")
 
@@ -98,9 +152,13 @@ def main():
         print("没有需要检查的物件")
         return
 
-    # 检查每个物件
-    blacklist_count = 0
-    unknown_count = 0
+    # 统计
+    stats = {
+        "可": 0,
+        "不可（仲介）": 0,
+        "物件による": 0,
+        "確認待ち": 0
+    }
 
     for i, page in enumerate(pages):
         props = page["properties"]
@@ -122,32 +180,38 @@ def main():
         print(f"\n[{i+1}/{len(pages)}] {reins_id} (得分: {score})")
         print(f"  管理会社: {company}")
 
-        # 检查是否在黑名单
-        is_blacklisted = False
-        for blacklisted in BLACKLIST_COMPANIES:
-            if blacklisted in company or company in blacklisted:
-                is_blacklisted = True
-                break
+        # 判断状态
+        status = None
 
-        if is_blacklisted:
+        # 检查黑名单
+        if match_company(company, blacklist):
             status = "不可（仲介）"
-            if update_ad_status(page_id, status, company):
-                print(f"  → 标记为 {status}")
-                blacklist_count += 1
-            else:
-                print(f"  ✗ 更新失败")
+
+        # 检查白名单
+        elif match_company(company, whitelist):
+            status = "可"
+
+        # 检查物件による
+        elif match_company(company, case_by_case):
+            status = "物件による"
+
+        # 未知
         else:
             status = "確認待ち"
-            if update_ad_status(page_id, status, company):
-                print(f"  → 标记为 {status}")
-                unknown_count += 1
-            else:
-                print(f"  ✗ 更新失败")
+
+        # 更新状态
+        if update_ad_status(page_id, status):
+            print(f"  → {status}")
+            stats[status] += 1
+        else:
+            print(f"  ✗ 更新失败")
 
     print(f"\n{'='*60}")
-    print(f"完成!")
-    print(f"黑名单管理会社: {blacklist_count} 个 → 不可（仲介）")
-    print(f"未知管理会社: {unknown_count} 个 → 確認待ち")
+    print("完成!")
+    print("-" * 30)
+    for status, count in stats.items():
+        if count > 0:
+            print(f"  {status}: {count} 个")
     print("=" * 60)
 
 

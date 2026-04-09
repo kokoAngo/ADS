@@ -17,9 +17,40 @@ os.chdir(r"D:\Fango Ads")
 CONDITIONS_FILE = "Conditions.md"
 # 日志文件
 LOG_FILE = "logs/suumo_rank.log"
+# 备份目录
+BACKUP_DIR = "backups"
+# 最大备份数量
+MAX_BACKUPS = 10
 
 # 确保logs目录存在
 os.makedirs("logs", exist_ok=True)
+# 确保备份目录存在
+os.makedirs(BACKUP_DIR, exist_ok=True)
+
+
+def backup_conditions_file():
+    """备份Conditions.md文件，保留最近的MAX_BACKUPS个备份"""
+    import shutil
+    import glob
+
+    if not os.path.exists(CONDITIONS_FILE):
+        return
+
+    # 生成备份文件名（带时间戳）
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_name = f"Conditions_{timestamp}.md"
+    backup_path = os.path.join(BACKUP_DIR, backup_name)
+
+    # 复制文件
+    shutil.copy2(CONDITIONS_FILE, backup_path)
+    print(f"✓ 已备份 Conditions.md -> {backup_path}")
+
+    # 清理旧备份，只保留最近的MAX_BACKUPS个
+    backup_files = sorted(glob.glob(os.path.join(BACKUP_DIR, "Conditions_*.md")))
+    if len(backup_files) > MAX_BACKUPS:
+        for old_file in backup_files[:-MAX_BACKUPS]:
+            os.remove(old_file)
+            print(f"  已删除旧备份: {old_file}")
 
 # 日志输出函数
 def log(msg):
@@ -566,17 +597,20 @@ def analyze_market_rank(page, prop):
 
 
 def main():
+    # 备份Conditions.md
+    backup_conditions_file()
+
     # 添加运行时间戳到日志
     log(f"\n\n{'='*60}")
     log(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log("SUUMO市场排名分析 v2")
-    log("分析得分>=6且无市場順位的物件")
+    log("分析得分>=4且无市場順位的物件")
     log("=" * 60)
 
     # 获取高分物件
     log("\n获取高分物件...")
-    properties = get_high_score_properties(min_score=6.0)
-    log(f"找到 {len(properties)} 个得分>=6的物件")
+    properties = get_high_score_properties(min_score=4.0)
+    log(f"找到 {len(properties)} 个得分>=4的物件")
 
     if not properties:
         log("没有找到高分物件")

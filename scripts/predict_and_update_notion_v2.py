@@ -65,8 +65,9 @@ with open("models/model_config_v2.json", "r", encoding='utf-8') as f:
 class NotionClient:
     """Notion API客户端"""
 
-    def __init__(self, api_key):
+    def __init__(self, api_key, database_id):
         self.api_key = api_key
+        self.database_id = database_id
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -80,6 +81,48 @@ class NotionClient:
         data = {"properties": properties}
         response = requests.patch(url, headers=self.headers, json=data)
         return response.json()
+
+    def get_unscored_properties(self):
+        """获取予測_view数为空的物件"""
+        url = f"{self.base_url}/databases/{self.database_id}/query"
+        all_results = []
+        has_more = True
+        start_cursor = None
+
+        while has_more:
+            payload = {
+                "page_size": 100,
+                "filter": {
+                    "property": "予測_view数",
+                    "number": {"is_empty": True}
+                }
+            }
+            if start_cursor:
+                payload["start_cursor"] = start_cursor
+
+            response = requests.post(url, headers=self.headers, json=payload, timeout=60)
+            data = response.json()
+
+            if "results" in data:
+                all_results.extend(data["results"])
+                has_more = data.get("has_more", False)
+                start_cursor = data.get("next_cursor")
+            else:
+                print(f"Query error: {data}")
+                break
+
+        # 提取REINS_ID和page_id
+        bukken_map = {}
+        for page in all_results:
+            props = page["properties"]
+            page_id = page["id"]
+            reins_id = ""
+            if "REINS_ID" in props and props["REINS_ID"]["title"]:
+                reins_id = props["REINS_ID"]["title"][0]["plain_text"]
+            if reins_id:
+                bukken_map[reins_id] = page_id
+
+        return bukken_map
 
 
 class ReinsScraper:
@@ -514,23 +557,18 @@ def main():
     print("=" * 60)
 
     # 初始化
-    notion = NotionClient(NOTION_API_KEY)
+    notion = NotionClient(NOTION_API_KEY, NOTION_DATABASE_ID)
 
-    # 读取未评分物件映射
-    print("\n读取未评分物件列表...")
-    bukken_map = {}
-    with open('data/unscored_pages_new.txt', 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if '|' in line:
-                parts = line.split('|')
-                bukken_number = parts[0]
-                page_id = parts[1]
-                if bukken_number:
-                    bukken_map[bukken_number] = page_id
+    # 从Notion查询未评分物件
+    print("\n从Notion查询未评分物件列表...")
+    bukken_map = notion.get_unscored_properties()
 
     bukken_list = list(bukken_map.items())  # 处理所有未评分物件
     print(f"未评分物件: {len(bukken_map)} 个, 本次处理: {len(bukken_list)} 个")
+
+    if not bukken_list:
+        print("\n没有需要处理的物件，退出")
+        return
 
     # 启动爬虫
     scraper = ReinsScraper(headless=False)
@@ -678,7 +716,7 @@ def main():
             print(f"结果已保存: data/notion_predictions_v2.csv")
 
             # 保存本次处理的新物件ID到缓存（供后续步骤使用）
-            new_ids = [r.get('reins_id') for r in results if r.get('reins_id')]
+            new_ids = [r.get('bukken_number') for r in results if r.get('bukken_number')]
             cache_file = 'data/new_properties_cache.txt'
             with open(cache_file, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(new_ids))

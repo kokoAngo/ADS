@@ -34,6 +34,13 @@ models/*.pkl
 .DS_Store
 Thumbs.db
 
+# Large data / binary files
+database/data/
+backups/
+
+# Sensitive data
+manager/
+
 # Temp
 *.tmp
 *.log
