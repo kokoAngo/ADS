@@ -263,7 +263,54 @@ def get_neighboring_stations(railway, station):
     return neighbors
 
 
-def get_high_score_properties(min_score=7.0):
+def get_below_threshold_properties(threshold=6.0):
+    """获取阈值以下、view数已评但市場順位为空的物件（用于标记跳过）"""
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
+    all_results = []
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+        payload = {
+            "page_size": 100,
+            "filter": {
+                "and": [
+                    {"property": "予測_view数", "number": {"less_than": threshold}},
+                    {"property": "予測_view数", "number": {"is_not_empty": True}},
+                    {"property": "市場順位", "rich_text": {"is_empty": True}}
+                ]
+            }
+        }
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        data = response.json()
+
+        if "results" in data:
+            all_results.extend(data["results"])
+            has_more = data.get("has_more", False)
+            start_cursor = data.get("next_cursor")
+        else:
+            log(f"Error: {data}")
+            break
+
+    return all_results
+
+
+def mark_skipped_rank(page_id):
+    """将低分物件的市場順位标记为--"""
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    data = {
+        "properties": {
+            "市場順位": {"rich_text": [{"text": {"content": "--"}}]}
+        }
+    }
+    response = requests.patch(url, headers=headers, json=data, timeout=60)
+    return response.status_code == 200
+
+
+def get_high_score_properties(min_score=6.0):
     """获取高分且没有市場順位的物件列表"""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     data = {
@@ -604,13 +651,13 @@ def main():
     log(f"\n\n{'='*60}")
     log(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log("SUUMO市场排名分析 v2")
-    log("分析得分>=4且无市場順位的物件")
+    log("分析得分>=6且无市場順位的物件")
     log("=" * 60)
 
     # 获取高分物件
     log("\n获取高分物件...")
-    properties = get_high_score_properties(min_score=4.0)
-    log(f"找到 {len(properties)} 个得分>=4的物件")
+    properties = get_high_score_properties(min_score=6.0)
+    log(f"找到 {len(properties)} 个得分>=6的物件")
 
     if not properties:
         log("没有找到高分物件")
@@ -695,6 +742,16 @@ def main():
         browser.close()
         playwright.stop()
         log("浏览器关闭")
+
+    # 标记低分物件为跳过
+    log("\n标记6分以下物件为跳过...")
+    low_pages = get_below_threshold_properties(threshold=6.0)
+    log(f"找到 {len(low_pages)} 个低分物件")
+    skipped_count = 0
+    for page in low_pages:
+        if mark_skipped_rank(page["id"]):
+            skipped_count += 1
+    log(f"已标记跳过: {skipped_count}/{len(low_pages)} 个")
 
 
 if __name__ == "__main__":

@@ -87,8 +87,8 @@ def match_company(company_name, company_set):
     return None
 
 
-def get_high_score_properties(min_score=4.0):
-    """获取4分以上且有管理会社但広告可为空的物件"""
+def get_high_score_properties(min_score=6.0):
+    """获取阈值以上且有商号但広告可为空的物件"""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     all_results = []
     has_more = True
@@ -100,7 +100,7 @@ def get_high_score_properties(min_score=4.0):
             "filter": {
                 "and": [
                     {"property": "予測_view数", "number": {"greater_than_or_equal_to": min_score}},
-                    {"property": "管理会社", "rich_text": {"is_not_empty": True}},
+                    {"property": "商号", "rich_text": {"is_not_empty": True}},
                     {"property": "広告可", "select": {"is_empty": True}}
                 ]
             }
@@ -134,9 +134,56 @@ def update_ad_status(page_id, status):
     return response.status_code == 200
 
 
+def get_below_threshold_properties(threshold=6.0):
+    """获取阈值以下、view数已评但広告可为空的物件（用于标记跳过）"""
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
+    all_results = []
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+        payload = {
+            "page_size": 100,
+            "filter": {
+                "and": [
+                    {"property": "予測_view数", "number": {"less_than": threshold}},
+                    {"property": "予測_view数", "number": {"is_not_empty": True}},
+                    {"property": "広告可", "select": {"is_empty": True}}
+                ]
+            }
+        }
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        data = response.json()
+
+        if "results" in data:
+            all_results.extend(data["results"])
+            has_more = data.get("has_more", False)
+            start_cursor = data.get("next_cursor")
+        else:
+            print(f"Error: {data}")
+            break
+
+    return all_results
+
+
+def mark_skipped(page_id):
+    """将低分物件标记为対象外（用--表示跳过）"""
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    data = {
+        "properties": {
+            "広告可": {"select": {"name": "--"}}
+        }
+    }
+    response = requests.patch(url, headers=headers, json=data, timeout=60)
+    return response.status_code == 200
+
+
 def main():
     print("=" * 60)
-    print("检查4分以上物件的管理会社")
+    print("检查6分以上物件的管理会社")
     print("=" * 60)
 
     # 加载公司列表
@@ -144,7 +191,7 @@ def main():
     blacklist, whitelist, case_by_case, all_companies = load_company_lists()
 
     # 获取物件
-    print("\n获取4分以上且広告可为空的物件...")
+    print("\n获取6分以上且広告可为空的物件...")
     pages = get_high_score_properties()
     print(f"找到 {len(pages)} 个物件需要检查")
 
@@ -169,10 +216,10 @@ def main():
         if "REINS_ID" in props and props["REINS_ID"]["title"]:
             reins_id = props["REINS_ID"]["title"][0]["plain_text"]
 
-        # 获取管理会社
+        # 获取管理会社（从商号字段读取）
         company = ""
-        if "管理会社" in props and props["管理会社"]["rich_text"]:
-            company = props["管理会社"]["rich_text"][0]["plain_text"]
+        if "商号" in props and props["商号"]["rich_text"]:
+            company = props["商号"]["rich_text"][0]["plain_text"]
 
         # 获取得分
         score = props.get("予測_view数", {}).get("number", 0)
@@ -213,6 +260,16 @@ def main():
         if count > 0:
             print(f"  {status}: {count} 个")
     print("=" * 60)
+
+    # 标记低分物件为跳过
+    print("\n标记6分以下物件为跳过...")
+    low_pages = get_below_threshold_properties(threshold=6.0)
+    print(f"找到 {len(low_pages)} 个低分物件")
+    skipped_count = 0
+    for page in low_pages:
+        if mark_skipped(page["id"]):
+            skipped_count += 1
+    print(f"已标记跳过: {skipped_count}/{len(low_pages)} 个")
 
 
 if __name__ == "__main__":
