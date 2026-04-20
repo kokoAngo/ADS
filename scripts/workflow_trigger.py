@@ -10,11 +10,34 @@ import sys
 import time
 import subprocess
 import logging
+import ctypes
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+# 阻止 Modern Standby / 系统休眠
+# ES_CONTINUOUS | ES_SYSTEM_REQUIRED: 持续告诉系统"不要睡眠"
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+
+# 截止时间(JST) — 每天 11/15/19/23 是新物件登载截止时间
+JST = timezone(timedelta(hours=9))
+CUTOFF_HOURS = [11, 15, 19, 23]
+
+
+def get_most_recent_cutoff():
+    now = datetime.now(JST)
+    today_cutoffs = [
+        now.replace(hour=h, minute=0, second=0, microsecond=0)
+        for h in CUTOFF_HOURS
+    ]
+    past = [c for c in today_cutoffs if c <= now]
+    if past:
+        return max(past)
+    return (now - timedelta(days=1)).replace(hour=23, minute=0, second=0, microsecond=0)
 
 # 配置
 SCRIPT_DIR = Path(__file__).parent
@@ -44,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 
 def check_notion_for_new_properties():
-    """检查Notion是否有新物件需要评估（予測_view数为空）"""
+    """检查Notion是否有当前 session 内新物件需要评估（予測_view数为空 且 创建时间 > 当前截止时间）"""
     try:
         headers = {
             "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -52,11 +75,14 @@ def check_notion_for_new_properties():
             "Notion-Version": "2022-06-28"
         }
         url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
+        cutoff = get_most_recent_cutoff()
         payload = {
             "page_size": 1,  # 只需要知道是否有，不需要全部数据
             "filter": {
-                "property": "予測_view数",
-                "number": {"is_empty": True}
+                "and": [
+                    {"property": "予測_view数", "number": {"is_empty": True}},
+                    {"timestamp": "created_time", "created_time": {"after": cutoff.isoformat()}}
+                ]
             }
         }
         response = requests.post(url, headers=headers, json=payload, timeout=30)
@@ -129,15 +155,9 @@ class WorkflowTriggerHandler(FileSystemEventHandler):
                 pass
 
     def _run_workflow(self):
-        """执行完整的Prediction Workflow"""
+        """执行完整的Prediction Workflow（V2: 单步逐物件流水线）"""
         steps = [
-            ("Step 1: 预测view数", "predict_and_update_notion_v2.py"),
-            ("Step 2: 检查管理公司", "check_management_company.py"),
-            ("Step 3: 预测反响数", "predict_inquiry.py"),
-            ("Step 4a: 市场排名分析", "suumo_rank_analysis.py"),
-            ("Step 4b: 广告数统计", "fix_missing_ad.py"),
-            ("Step 5: 计算推薦点数", "recommend_properties.py"),
-            ("Step 6: 更新TOP推荐", "update_top_recommendations.py"),
+            ("Pipeline: 逐物件处理 (view→広告可→反响→市場順位→広告数→推薦点数→TOP)", "process_pipeline.py"),
         ]
 
         success_count = 0
@@ -154,13 +174,9 @@ class WorkflowTriggerHandler(FileSystemEventHandler):
             logger.info(f"{'='*40}")
 
             try:
-                # 需要更长时间的步骤
-                if "predict_and_update" in script_name:
-                    step_timeout = 1800  # Step1: 30分钟（浏览器爬取）
-                elif "predict_inquiry" in script_name:
-                    step_timeout = 1800  # Step3: 30分钟（大量API调用）
-                elif "recommend_properties" in script_name:
-                    step_timeout = 2400  # Step5: 40分钟（大量物件处理）
+                # process_pipeline 是长时间运行的统一流水线
+                if "process_pipeline" in script_name:
+                    step_timeout = 14400  # 4小时（处理大量积压物件）
                 else:
                     step_timeout = 600   # 其他: 10分钟
 
@@ -218,11 +234,13 @@ def main():
     logger.info("开始监控... (按Ctrl+C停止)")
     logger.info(f"触发方式1: 修改或更新 {TRIGGER_FILE}")
     logger.info(f"触发方式2: 每 {POLL_INTERVAL // 60} 分钟自动检查Notion新物件")
+    logger.info(f"触发方式3: 截止时刻(JST {','.join(str(h)+':00' for h in CUTOFF_HOURS)})到达时立即触发")
 
     # 睡眠检测参数
     SLEEP_DETECT_THRESHOLD = 60  # 如果循环间隔超过60秒，认为电脑经历了睡眠
     last_check_time = time.time()
     last_poll_time = time.time()  # 上次轮询Notion的时间
+    last_known_cutoff = get_most_recent_cutoff()  # 上次已知的截止时间
 
     try:
         while True:
@@ -235,6 +253,14 @@ def main():
                 logger.warning(f"检测到系统恢复（暂停了 {time_gap:.0f} 秒），自动触发Workflow")
                 event_handler._handle_trigger()
                 last_poll_time = current_time  # 重置轮询时间
+
+            # 截止时刻检测：如果当前最近截止时间发生了变化，立即触发
+            current_cutoff = get_most_recent_cutoff()
+            if current_cutoff != last_known_cutoff:
+                logger.warning(f"截止时刻到达 ({current_cutoff.strftime('%Y-%m-%d %H:%M JST')})，立即触发Workflow追最新物件")
+                last_known_cutoff = current_cutoff
+                event_handler._handle_trigger()
+                last_poll_time = current_time
 
             # Notion轮询：定期检查是否有新物件
             poll_gap = current_time - last_poll_time
