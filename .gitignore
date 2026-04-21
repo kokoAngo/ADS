@@ -45,3 +45,10 @@ manager/
 *.tmp
 *.log
 nul
+
+# Runtime trigger state
+trigger/run_workflow.flag
+
+# macOS venv
+venv/
+logs/
