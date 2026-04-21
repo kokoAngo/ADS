@@ -12,7 +12,7 @@ import requests
 import re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.chdir(r"D:\Fango Ads")
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 import pandas as pd
@@ -24,7 +24,7 @@ sys.stdout.reconfigure(line_buffering=True)
 load_dotenv()
 
 # Notion配置
-NOTION_API_KEY = os.getenv("NOTION_API_KEY", "ntn_u754288580510OTZ1AbHOcBNrbctyy3cVt7LNbvNSD752Q")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
 
 # 加载V2模型

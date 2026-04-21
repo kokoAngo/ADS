@@ -11,7 +11,7 @@ import requests
 import re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.chdir(r"D:\Fango Ads")
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
@@ -26,7 +26,7 @@ REINS_USERNAME = os.getenv("REINS_USERNAME")
 REINS_PASSWORD = os.getenv("REINS_PASSWORD")
 
 # Notion配置 - 新表
-NOTION_API_KEY = os.getenv("NOTION_API_KEY", "ntn_u754288580510OTZ1AbHOcBNrbctyy3cVt7LNbvNSD752Q")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID = "3051c197-4dad-80d5-8493-c65a42f6a831"  # demo_新着物件_260212_新宿区のみ
 
 # 加载模型

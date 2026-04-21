@@ -10,7 +10,7 @@ import json
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.chdir(r"D:\Fango Ads")
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 sys.stdout.reconfigure(line_buffering=True)
 load_dotenv()
 
-NOTION_API_KEY = os.getenv("NOTION_API_KEY", "ntn_u754288580510OTZ1AbHOcBNrbctyy3cVt7LNbvNSD752Q")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 
 notion_headers = {
     "Authorization": f"Bearer {NOTION_API_KEY}",

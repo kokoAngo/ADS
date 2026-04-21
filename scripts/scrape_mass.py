@@ -232,7 +232,7 @@ class MassScraper(SummoScraper):
 
 
 def main():
-    os.chdir(r"D:\Fango Ads")
+    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     scraper = MassScraper(target_count=10000)
 
     try:

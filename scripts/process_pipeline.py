@@ -11,12 +11,14 @@ import re
 import math
 import time
 import csv
+import threading
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from queue import Queue, Empty
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.chdir(r"D:\Fango Ads")
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from dotenv import load_dotenv
@@ -28,15 +30,16 @@ load_dotenv()
 # ============================================================
 # Constants
 # ============================================================
-NOTION_API_KEY = os.getenv("NOTION_API_KEY", "ntn_u754288580510OTZ1AbHOcBNrbctyy3cVt7LNbvNSD752Q")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
 RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おすすめ
 PENDING_DATABASE_ID = "3181c1974dad80279cb7dfdeb92b946f"   # 確認待ち物件
 
-# 截止时间（JST）— 每天 11:00, 15:00, 19:00, 23:00 是新物件登载截止时间
+# 截止时间（JST）— 每天 11:05, 15:05, 19:05, 23:05 是新物件登载截止时间
 # 流水线只评估"最近一次截止时间之后"创建的物件
 JST = timezone(timedelta(hours=9))
 CUTOFF_HOURS = [11, 15, 19, 23]
+CUTOFF_MINUTE = 5
 
 # 阈值
 VIEW_THRESHOLD = 6.0           # view < 此值跳过后续步骤
@@ -59,11 +62,18 @@ FULL_DATA_FILE = DATA_DIR / "management_companies.csv"
 LOG_FILE = Path("logs") / "process_pipeline.log"
 LOG_FILE.parent.mkdir(exist_ok=True)
 
+# 并发控制
+WORKER_COUNT = int(os.getenv("WORKER_COUNT", "3"))
+_notion_lock = threading.Lock()
+_stats_lock = threading.Lock()
+_log_lock = threading.Lock()
+
 
 def log(msg):
-    print(msg)
-    with open(LOG_FILE, 'a', encoding='utf-8') as f:
-        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    with _log_lock:
+        print(msg)
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
 
 # ============================================================
@@ -888,29 +898,30 @@ def get_top_existing(db_id):
 
 def add_to_top_db(db_id, db_name, prop):
     """物件实时添加到TOP DB（去重 + 满了删最早）"""
-    existing = get_top_existing(db_id)
-    existing_ids = {e["reins_id"] for e in existing}
+    with _notion_lock:
+        existing = get_top_existing(db_id)
+        existing_ids = {e["reins_id"] for e in existing}
 
-    if prop["reins_id"] in existing_ids:
-        return False  # 已存在
+        if prop["reins_id"] in existing_ids:
+            return False  # 已存在
 
-    # 满了删最早
-    if len(existing) >= MAX_RECOMMENDATIONS:
-        notion_archive(existing[0]["page_id"])
+        # 满了删最早
+        if len(existing) >= MAX_RECOMMENDATIONS:
+            notion_archive(existing[0]["page_id"])
 
-    properties = {
-        "REINS_ID": {"title": [{"text": {"content": prop["reins_id"]}}]},
-        "推薦点数": {"number": prop["score"]},
-        "物件名": {"rich_text": [{"text": {"content": prop.get("building_name", "")}}]} if prop.get("building_name") else {"rich_text": []},
-        "管理会社": {"rich_text": [{"text": {"content": prop.get("management_company", "")}}]} if prop.get("management_company") else {"rich_text": []},
-        "公開日時": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}},
-        "Status": {"status": {"name": "広告待ち"}}
-    }
+        properties = {
+            "REINS_ID": {"title": [{"text": {"content": prop["reins_id"]}}]},
+            "推薦点数": {"number": prop["score"]},
+            "物件名": {"rich_text": [{"text": {"content": prop.get("building_name", "")}}]} if prop.get("building_name") else {"rich_text": []},
+            "管理会社": {"rich_text": [{"text": {"content": prop.get("management_company", "")}}]} if prop.get("management_company") else {"rich_text": []},
+            "公開日時": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}},
+            "Status": {"status": {"name": "広告待ち"}}
+        }
 
-    if notion_create(db_id, properties):
-        log(f"    → 写入 {db_name}: {prop['reins_id']} ({prop['score']}分)")
-        return True
-    return False
+        if notion_create(db_id, properties):
+            log(f"    → 写入 {db_name}: {prop['reins_id']} ({prop['score']}分)")
+            return True
+        return False
 
 
 # ============================================================
@@ -943,6 +954,11 @@ def process_property(prop_data, browser_page, browser_context):
     ad_status = check_management(company)
     notion_update(page_id, {"広告可": {"select": {"name": ad_status}}})
     log(f"  広告可: {ad_status} ({company[:30]})")
+
+    # 不可（仲介）: 永不进 TOP 表,跳过后续 SUUMO 抓取
+    if ad_status == "不可（仲介）":
+        notion_update(page_id, {"市場順位": {"rich_text": [{"text": {"content": "--"}}]}})
+        return "unallowed"
 
     # Step 4: 反响数预测
     inquiry = predict_inquiry(prop_data)
@@ -1003,15 +1019,15 @@ def get_current_cutoff():
     """返回当前最近一次截止时间(JST)。流水线只处理此时间之后创建的物件"""
     now = datetime.now(JST)
     today_cutoffs = [
-        now.replace(hour=h, minute=0, second=0, microsecond=0)
+        now.replace(hour=h, minute=CUTOFF_MINUTE, second=0, microsecond=0)
         for h in CUTOFF_HOURS
     ]
     past = [c for c in today_cutoffs if c <= now]
     if past:
         return max(past)
-    # 在今天第一个截止时间(11:00)之前 → 用昨天的最后一个截止时间(23:00)
+    # 在今天第一个截止时间(11:05)之前 → 用昨天的最后一个截止时间(23:05)
     yesterday = now - timedelta(days=1)
-    return yesterday.replace(hour=23, minute=0, second=0, microsecond=0)
+    return yesterday.replace(hour=23, minute=CUTOFF_MINUTE, second=0, microsecond=0)
 
 
 def fetch_unscored_properties(cutoff):
@@ -1028,9 +1044,76 @@ def fetch_unscored_properties(cutoff):
     )
 
 
+def _route_filter(route):
+    """拦截图片/字体/CSS/分析脚本,加速 Playwright 页面加载"""
+    rt = route.request.resource_type
+    url = route.request.url
+    if rt in ("image", "media", "font", "stylesheet"):
+        route.abort()
+        return
+    if any(x in url for x in ("googletagmanager", "doubleclick", "google-analytics",
+                               "googlesyndication", "adnxs", "facebook.com/tr",
+                               "criteo", "yimg.jp/images/ad", "adservice")):
+        route.abort()
+        return
+    route.continue_()
+
+
+def _worker(name, work_queue, stats, stop_event):
+    """Worker 线程: 独占一个 Playwright 浏览器实例,持续从队列消费物件"""
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=True)
+    context = browser.new_context(viewport={'width': 1920, 'height': 1080}, locale='ja-JP')
+    context.route("**/*", _route_filter)
+    page = context.new_page()
+    processed = 0
+    try:
+        while not stop_event.is_set():
+            try:
+                item = work_queue.get(timeout=1)
+            except Empty:
+                continue
+            if item is None:
+                work_queue.task_done()
+                break
+            idx, total, data = item
+            log(f"\n[{name} {idx}/{total}] {data.get('bukken_number','?')}")
+            try:
+                result = process_property(data, page, context)
+                with _stats_lock:
+                    stats[result] = stats.get(result, 0) + 1
+            except Exception as e:
+                log(f"  ✗ [{name}] 处理异常: {str(e)[:120]}")
+                with _stats_lock:
+                    stats["error"] = stats.get("error", 0) + 1
+            finally:
+                work_queue.task_done()
+                processed += 1
+    finally:
+        try:
+            browser.close()
+            pw.stop()
+        except Exception:
+            pass
+        log(f"[{name}] 退出 (处理 {processed} 件)")
+
+
+def _fill_queue(work_queue, pages):
+    """把 Notion 原始页转为 data 后入队,返回入队数量"""
+    enqueued = 0
+    total = len(pages)
+    for raw_page in pages:
+        data = extract_property(raw_page)
+        if data:
+            enqueued += 1
+            work_queue.put((enqueued, total, data))
+    return enqueued
+
+
 def main():
     log("=" * 60)
     log("Property Processing Pipeline V2 - 截止时间感知")
+    log(f"WORKER_COUNT = {WORKER_COUNT}")
     log("=" * 60)
 
     current_cutoff = get_current_cutoff()
@@ -1040,56 +1123,74 @@ def main():
     pages = fetch_unscored_properties(current_cutoff)
     log(f"未评分物件: {len(pages)} 个")
 
+    _limit = os.getenv("PIPELINE_LIMIT")
+    if _limit:
+        pages = pages[:int(_limit)]
+        log(f"PIPELINE_LIMIT={_limit}: 只处理前 {len(pages)} 个")
+
     if not pages:
         log("没有需要处理的物件")
         return
 
-    # 启动浏览器
-    log("\n启动 Playwright 浏览器...")
-    playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(headless=False)
-    context = browser.new_context(viewport={'width': 1920, 'height': 1080}, locale='ja-JP')
-    page = context.new_page()
+    work_queue = Queue()
+    enqueued = _fill_queue(work_queue, pages)
+    log(f"入队: {enqueued} 个")
 
-    stats = {"success": 0, "low_view": 0, "no_rent": 0, "error": 0}
+    stats = {"success": 0, "low_view": 0, "unallowed": 0, "no_rent": 0, "error": 0}
+    stop_event = threading.Event()
+
+    log(f"\n启动 {WORKER_COUNT} 个并发 Playwright worker (headless, 资源拦截开启)...")
+    workers = []
+    for i in range(WORKER_COUNT):
+        t = threading.Thread(
+            target=_worker,
+            args=(f"W{i+1}", work_queue, stats, stop_event),
+            daemon=False,
+            name=f"worker-{i+1}"
+        )
+        t.start()
+        workers.append(t)
 
     try:
-        i = 0
-        while i < len(pages):
-            # 每次迭代检查截止时间是否变化
+        # 主线程:监控截止时间 + 等待队列空
+        while any(t.is_alive() for t in workers):
             new_cutoff = get_current_cutoff()
             if new_cutoff != current_cutoff:
                 log(f"\n>>> 截止时间变化: {current_cutoff.strftime('%H:%M')} → {new_cutoff.strftime('%H:%M')}")
-                log(f">>> 立刻停止处理旧时段物件，重新拉取队列")
+                log(f">>> 清空队列,重新拉取")
+                while True:
+                    try:
+                        work_queue.get_nowait()
+                        work_queue.task_done()
+                    except Empty:
+                        break
                 current_cutoff = new_cutoff
                 pages = fetch_unscored_properties(current_cutoff)
-                log(f">>> 新队列: {len(pages)} 个")
-                i = 0
-                continue
+                added = _fill_queue(work_queue, pages)
+                log(f">>> 新队列: {added} 个")
 
-            raw_page = pages[i]
-            data = extract_property(raw_page)
-            if not data:
-                i += 1
-                continue
+            if work_queue.empty():
+                # 队列空 → 发毒丸让 worker 退出
+                for _ in range(WORKER_COUNT):
+                    work_queue.put(None)
+                break
 
-            log(f"\n[{i+1}/{len(pages)}] {data.get('bukken_number','?')}")
-
+            time.sleep(10)
+    except KeyboardInterrupt:
+        log("\n>>> 收到中断,清空队列让 worker 收尾")
+        stop_event.set()
+        while True:
             try:
-                result = process_property(data, page, context)
-                stats[result] = stats.get(result, 0) + 1
-            except Exception as e:
-                log(f"  ✗ 处理异常: {str(e)[:120]}")
-                stats["error"] += 1
-
-            i += 1
+                work_queue.get_nowait()
+                work_queue.task_done()
+            except Empty:
+                break
+        for _ in range(WORKER_COUNT):
+            work_queue.put(None)
     finally:
-        try:
-            browser.close()
-            playwright.stop()
-        except:
-            pass
-        log("\n浏览器已关闭")
+        for t in workers:
+            t.join(timeout=120)
+        log("\n所有 worker 已关闭")
 
     log(f"\n{'='*60}")
     log("完成!")

@@ -10,34 +10,37 @@ import sys
 import time
 import subprocess
 import logging
-import ctypes
 import requests
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# 阻止 Modern Standby / 系统休眠
-# ES_CONTINUOUS | ES_SYSTEM_REQUIRED: 持续告诉系统"不要睡眠"
-ES_CONTINUOUS = 0x80000000
-ES_SYSTEM_REQUIRED = 0x00000001
-ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+# 阻止系统睡眠: Windows 用 SetThreadExecutionState, macOS 用 caffeinate
+if sys.platform == 'win32':
+    import ctypes
+    ES_CONTINUOUS = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+elif sys.platform == 'darwin':
+    subprocess.Popen(['caffeinate', '-s', '-w', str(os.getpid())])
 
-# 截止时间(JST) — 每天 11/15/19/23 是新物件登载截止时间
+# 截止时间(JST) — 每天 11:05/15:05/19:05/23:05 是新物件登载截止时间
 JST = timezone(timedelta(hours=9))
 CUTOFF_HOURS = [11, 15, 19, 23]
+CUTOFF_MINUTE = 5
 
 
 def get_most_recent_cutoff():
     now = datetime.now(JST)
     today_cutoffs = [
-        now.replace(hour=h, minute=0, second=0, microsecond=0)
+        now.replace(hour=h, minute=CUTOFF_MINUTE, second=0, microsecond=0)
         for h in CUTOFF_HOURS
     ]
     past = [c for c in today_cutoffs if c <= now]
     if past:
         return max(past)
-    return (now - timedelta(days=1)).replace(hour=23, minute=0, second=0, microsecond=0)
+    return (now - timedelta(days=1)).replace(hour=23, minute=CUTOFF_MINUTE, second=0, microsecond=0)
 
 # 配置
 SCRIPT_DIR = Path(__file__).parent
@@ -46,9 +49,9 @@ TRIGGER_FILE = PROJECT_DIR / "trigger" / "run_workflow.flag"
 LOG_FILE = PROJECT_DIR / "logs" / "workflow_trigger.log"
 
 # Notion轮询配置
-NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "ntn_u754288580510OTZ1AbHOcBNrbctyy3cVt7LNbvNSD752Q")
+NOTION_API_KEY = os.environ.get("NOTION_API_KEY")
 NOTION_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
-POLL_INTERVAL = 30 * 60  # 30分钟轮询一次
+POLL_INTERVAL = 10 * 60  # 10分钟轮询一次
 
 # 确保目录存在
 TRIGGER_FILE.parent.mkdir(exist_ok=True)
@@ -234,7 +237,7 @@ def main():
     logger.info("开始监控... (按Ctrl+C停止)")
     logger.info(f"触发方式1: 修改或更新 {TRIGGER_FILE}")
     logger.info(f"触发方式2: 每 {POLL_INTERVAL // 60} 分钟自动检查Notion新物件")
-    logger.info(f"触发方式3: 截止时刻(JST {','.join(str(h)+':00' for h in CUTOFF_HOURS)})到达时立即触发")
+    logger.info(f"触发方式3: 截止时刻(JST {','.join(f'{h}:{CUTOFF_MINUTE:02d}' for h in CUTOFF_HOURS)})到达时立即触发")
 
     # 睡眠检测参数
     SLEEP_DETECT_THRESHOLD = 60  # 如果循环间隔超过60秒，认为电脑经历了睡眠

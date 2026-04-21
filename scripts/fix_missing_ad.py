@@ -12,10 +12,10 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from dotenv import load_dotenv
 
 # 设置工作目录
-os.chdir(r"D:\Fango Ads")
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv()
 
-NOTION_API_KEY = os.getenv('NOTION_API_KEY', 'ntn_u754288580510OTZ1AbHOcBNrbctyy3cVt7LNbvNSD752Q')
+NOTION_API_KEY = os.getenv('NOTION_API_KEY')
 DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
 
 notion_headers = {

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-NOTION_API_KEY = os.getenv("NOTION_API_KEY", "ntn_u754288580510OTZ1AbHOcBNrbctyy3cVt7LNbvNSD752Q")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 TRAINING_DATABASE_ID = "30b1c197-4dad-80ec-9ea3-d63db4c0ace9"
 
 notion_headers = {

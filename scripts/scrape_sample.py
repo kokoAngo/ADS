@@ -200,7 +200,7 @@ class SampleScraper(SummoScraper):
 
 
 def main():
-    os.chdir(r"D:\Fango Ads")
+    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     scraper = SampleScraper(sample_ratio=0.05)
 
     try:

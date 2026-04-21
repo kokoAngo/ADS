@@ -157,7 +157,7 @@ class LowResponseScraper(SummoScraper):
 
 
 def main():
-    os.chdir(r"D:\Fango Ads")
+    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     scraper = LowResponseScraper()
 
     try:

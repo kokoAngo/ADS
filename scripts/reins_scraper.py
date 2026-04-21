@@ -213,7 +213,7 @@ class ReinsScraper:
 
 
 def main():
-    os.chdir(r"D:\Fango Ads")
+    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     # 读取物件番号
     with open('data/notion_bukken_numbers.txt', 'r') as f:

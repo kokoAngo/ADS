@@ -166,7 +166,7 @@ def export_updated_csv():
 
 if __name__ == "__main__":
     import os
-    os.chdir(r"D:\Fango Ads")
+    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     print("=== 从raw_data解析缺失字段 ===\n")
     update_database()

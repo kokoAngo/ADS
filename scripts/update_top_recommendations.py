@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Notion配置
-NOTION_API_KEY = os.getenv("NOTION_API_KEY", "ntn_u754288580510OTZ1AbHOcBNrbctyy3cVt7LNbvNSD752Q")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 SOURCE_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"  # 原始物件数据库
 RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おすすめ (広告可=可)
 PENDING_DATABASE_ID = "3181c1974dad80279cb7dfdeb92b946f"  # 確認待ち物件

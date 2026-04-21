@@ -11,7 +11,7 @@ import math
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.chdir(r"D:\Fango Ads")
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 条件记录文件
 CONDITIONS_FILE = "Conditions.md"
@@ -67,7 +67,7 @@ sys.stdout.reconfigure(line_buffering=True)
 load_dotenv()
 
 # Notion配置
-NOTION_API_KEY = os.getenv("NOTION_API_KEY", "ntn_u754288580510OTZ1AbHOcBNrbctyy3cVt7LNbvNSD752Q")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
 
 headers = {
