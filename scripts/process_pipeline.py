@@ -35,11 +35,11 @@ DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
 RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おすすめ
 PENDING_DATABASE_ID = "3181c1974dad80279cb7dfdeb92b946f"   # 確認待ち物件
 
-# 截止时间（JST）— 每天 11:05, 15:05, 19:05, 23:05 是新物件登载截止时间
+# 截止时间（JST）— 每天 11:00, 15:00, 19:00, 23:00 是新物件登载截止时间
 # 流水线只评估"最近一次截止时间之后"创建的物件
 JST = timezone(timedelta(hours=9))
 CUTOFF_HOURS = [11, 15, 19, 23]
-CUTOFF_MINUTE = 5
+CUTOFF_MINUTE = 0
 
 # 阈值
 VIEW_THRESHOLD = 6.0           # view < 此值跳过后续步骤
@@ -1025,7 +1025,7 @@ def get_current_cutoff():
     past = [c for c in today_cutoffs if c <= now]
     if past:
         return max(past)
-    # 在今天第一个截止时间(11:05)之前 → 用昨天的最后一个截止时间(23:05)
+    # 在今天第一个截止时间(11:00)之前 → 用昨天的最后一个截止时间(23:00)
     yesterday = now - timedelta(days=1)
     return yesterday.replace(hour=23, minute=CUTOFF_MINUTE, second=0, microsecond=0)
 

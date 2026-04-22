@@ -13,8 +13,12 @@ import logging
 import requests
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+# 从项目根的 .env 读取 NOTION_API_KEY 等
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 # 阻止系统睡眠: Windows 用 SetThreadExecutionState, macOS 用 caffeinate
 if sys.platform == 'win32':
@@ -25,10 +29,10 @@ if sys.platform == 'win32':
 elif sys.platform == 'darwin':
     subprocess.Popen(['caffeinate', '-s', '-w', str(os.getpid())])
 
-# 截止时间(JST) — 每天 11:05/15:05/19:05/23:05 是新物件登载截止时间
+# 截止时间(JST) — 每天 11:00/15:00/19:00/23:00 是新物件登载截止时间
 JST = timezone(timedelta(hours=9))
 CUTOFF_HOURS = [11, 15, 19, 23]
-CUTOFF_MINUTE = 5
+CUTOFF_MINUTE = 0
 
 
 def get_most_recent_cutoff():
