@@ -3,7 +3,7 @@
 """
 Watch Registrations - 独立服务
 
-定期扫描「新着物件おすすめ」DB:
+定期扫描推荐 DB (新着物件おすすめ / 確認待ち物件):
 1. 跳过 Status=取下済 的物件
 2. 按 REINS_ID 从 MAIN DB 取得 rent/area (用于过滤 SUUMO 搜索结果)
 3. 用物件名在 SUUMO 上做キーワード搜索, 按 rent±0.5万 & area±2m2 过滤
@@ -12,13 +12,12 @@ Watch Registrations - 独立服务
 
 该服务与物件评估服务(process_pipeline.py / workflow_trigger.py)完全独立:
   - 独立日志: logs/watch_registrations.log
-  - 独立进程,一次性运行后退出(cron 驱动)
+  - 独立进程,一次性运行后退出 (launchd/cron 驱动)
   - 独立 Playwright 浏览器实例
   - 不依赖模型 / 沿線字典
 
-典型运行方式(每 2 小时一次, cron):
-  0 */2 * * * cd /Users/developer_recika/Fango/ADS && \
-      ./venv/bin/python scripts/watch_registrations.py >> logs/watch_registrations.cron.log 2>&1
+调度: ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
+  每天 :30 每 2 小时 (0:30, 2:30, ..., 22:30 JST)
 """
 import os
 import sys
@@ -45,8 +44,12 @@ sys.stdout.reconfigure(line_buffering=True)
 # ============================================================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 MAIN_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"       # 全物件 DB
-RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"      # 新着物件おすすめ
-SKIP_STATUS = "取下済"
+# 需要扫描的推荐 DB(都有 REINS_ID / 物件名 / Status / 登録店舗数 字段)
+# 每项: (显示名, DB ID, 要跳过的 Status 列表)
+TARGET_DATABASES = [
+    ("新着物件おすすめ", "3171c1974dad80439367df13aa67f012", ["取下済"]),
+    ("確認待ち物件",      "3181c1974dad80279cb7dfdeb92b946f", []),
+]
 
 SUUMO_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=040&ta=13"
 
@@ -290,17 +293,18 @@ def process_one(item, browser_page):
     return "not_found"
 
 
-def main():
-    log("=" * 60)
-    log("Watch Registrations — 独立服务")
-    log("=" * 60)
-
-    log("查询 新着物件おすすめ DB...")
-    pages = notion_query(RECOMMEND_DATABASE_ID, filter_obj={
-        "property": "Status",
-        "status": {"does_not_equal": SKIP_STATUS}
-    })
-
+def collect_items(db_label, db_id, skip_statuses):
+    """
+    从一个推荐 DB 取出物件列表, 附带来源 DB 名称。
+    skip_statuses: 要跳过的 Status 名称列表, 空列表表示全表扫描。
+    """
+    log(f"查询 {db_label} ({db_id})...")
+    filter_obj = None
+    if skip_statuses:
+        # 多个 skip 用 and 串联: Status 不等于每一个
+        conds = [{"property": "Status", "status": {"does_not_equal": s}} for s in skip_statuses]
+        filter_obj = {"and": conds} if len(conds) > 1 else conds[0]
+    pages = notion_query(db_id, filter_obj=filter_obj)
     items = []
     for p in pages:
         props = p["properties"]
@@ -311,16 +315,35 @@ def main():
         if props.get("物件名", {}).get("rich_text"):
             name = props["物件名"]["rich_text"][0]["plain_text"]
         if reins_id and name:
-            items.append({"page_id": p["id"], "reins_id": reins_id, "building_name": name})
+            items.append({
+                "page_id": p["id"],
+                "reins_id": reins_id,
+                "building_name": name,
+                "source_db": db_label,
+            })
+    suffix = f" (已排除 Status={'/'.join(skip_statuses)})" if skip_statuses else " (全表)"
+    log(f"  → {len(items)} 件{suffix}")
+    return items
 
-    log(f"待处理: {len(items)} 件 (已排除 Status={SKIP_STATUS})")
+
+def main():
+    log("=" * 60)
+    log("Watch Registrations — 独立服务")
+    log("=" * 60)
+
+    # 从多个推荐 DB 收集物件
+    all_items = []
+    for db_label, db_id, skip_statuses in TARGET_DATABASES:
+        all_items.extend(collect_items(db_label, db_id, skip_statuses))
+
+    log(f"\n合计待处理: {len(all_items)} 件")
 
     _limit = os.getenv("TEST_LIMIT")
     if _limit:
-        items = items[: int(_limit)]
-        log(f"TEST_LIMIT={_limit}: 只处理前 {len(items)} 件")
+        all_items = all_items[: int(_limit)]
+        log(f"TEST_LIMIT={_limit}: 只处理前 {len(all_items)} 件")
 
-    if not items:
+    if not all_items:
         log("没有待处理物件")
         return
 
@@ -334,8 +357,8 @@ def main():
     stats = {"success": 0, "not_found": 0, "skip_no_data": 0, "update_failed": 0, "error": 0}
 
     try:
-        for i, item in enumerate(items):
-            log(f"\n[{i + 1}/{len(items)}] REINS_ID={item['reins_id']}")
+        for i, item in enumerate(all_items):
+            log(f"\n[{i + 1}/{len(all_items)}] [{item['source_db']}] REINS_ID={item['reins_id']}")
             try:
                 result = process_one(item, page)
                 stats[result] = stats.get(result, 0) + 1
