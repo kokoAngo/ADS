@@ -43,7 +43,7 @@ CUTOFF_MINUTE = 0
 
 # 阈值
 VIEW_THRESHOLD = 6.0           # view < 此值跳过后续步骤
-RECOMMEND_THRESHOLD = 6.5      # 推薦点数 >= 此值才写入TOP表
+RECOMMEND_THRESHOLD = 5.8      # 推薦点数 >= 此值才写入TOP表
 MAX_RECOMMENDATIONS = 20       # TOP表上限
 
 # 推薦点数权重
