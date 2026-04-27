@@ -23,6 +23,10 @@ workflow_trigger.py  (daemon, nohup 启动)
 
 launchd: jp.ango.watchregistrations  (~/Library/LaunchAgents/)
   └── 每天 12 次 (0:30, 2:30, …, 22:30 JST) → watch_registrations.py
+
+launchd: jp.ango.synccompanylists
+  └── 每天 1 次 (01:00 JST) → sync_company_lists.py
+       从「確認待ち物件 DB」的「会社広告可否」列同步 staff 判定 → blacklist/whitelist/case_by_case
 ```
 
 ## 关键文件(只看这几个就够)
@@ -32,7 +36,8 @@ launchd: jp.ango.watchregistrations  (~/Library/LaunchAgents/)
 | `scripts/workflow_trigger.py` | daemon, 监听+触发 |
 | `scripts/process_pipeline.py` | 评估 pipeline 主体(全部业务逻辑在这) |
 | `scripts/watch_registrations.py` | 独立的中介数监视(SUUMO kwd 搜索) |
-| `scripts/launchd/jp.ango.watchregistrations.plist` | launchd 调度模板 |
+| `scripts/sync_company_lists.py` | 把 staff 在 Notion 的判定同步到 blacklist/whitelist/case_by_case |
+| `scripts/launchd/*.plist` | launchd 调度模板 |
 | `config.py` | SUUMO 登录 + DB URL |
 | `.env` / `.env.example` | NOTION_API_KEY / SUUMO_USERNAME / REINS 等 |
 
@@ -63,9 +68,11 @@ launchd: jp.ango.watchregistrations  (~/Library/LaunchAgents/)
 |---|---|---|---|
 | MAIN(全物件) | `3031c197-4dad-800b-917d-d09b8602ec39` | — | 物件原始库, 字段最全 |
 | 新着物件おすすめ TOP | `3171c1974dad80439367df13aa67f012` | 広告待ち / 掲載保留 / 掲載指示済み / **取下済** / 要確認 | 広告可==「可」的高分 |
-| 確認待ち物件 TOP | `3181c1974dad80279cb7dfdeb92b946f` | 広告待ち / 広告済 / To-do / In progress / Complete | 広告可==「確認待ち」的高分(无「取下済」) |
+| 確認待ち物件 TOP | `3181c1974dad80279cb7dfdeb92b946f` | 広告待ち / 広告済 / To-do / In progress / Complete | 広告可==「確認待ち」的高分(无「取下済」)|
 
 共同字段: `REINS_ID(title)`, `物件名(rich_text)`, `推薦点数(number)`, `Status(status)`, `登録店舗数(number)`, `公開日時(date)`
+
+**確認待ち物件**多一个 `会社広告可否(select)` 列:可 / 不可 / 物件による (空) — staff 顺手填这个列, sync_company_lists.py 会同步到 .txt/.csv,下次 pipeline 该公司就不再 確認待ち
 
 ## 运维命令
 
@@ -118,5 +125,6 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 - **2026-04-22** 物件名清洗(号室后缀 + 括号读み)
 - **2026-04-24** watch_registrations 扩展到 確認待ち物件 DB(per-DB skip_statuses 配置)
 - **2026-04-25** `RECOMMEND_THRESHOLD` 6.5 → 5.8(原阈值 TOP 表录入太少)
+- **2026-04-27** 確認待ち物件 DB 加 `会社広告可否` 列 + `sync_company_lists.py` + launchd `jp.ango.synccompanylists`(staff 顺手填判定 → 自动同步到名单)
 
 完整 git 历史: `git log --oneline` 在分支 `mac开发版1.0`(GitHub remote: `kokoAngo/ADS`)

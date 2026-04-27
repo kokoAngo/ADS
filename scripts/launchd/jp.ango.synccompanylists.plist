@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>jp.ango.synccompanylists</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/developer_recika/Fango/ADS/venv/bin/python</string>
+        <string>/Users/developer_recika/Fango/ADS/scripts/sync_company_lists.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/developer_recika/Fango/ADS</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/developer_recika/Fango/ADS/logs/sync_company_lists.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/developer_recika/Fango/ADS/logs/sync_company_lists.launchd.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- 每天 01:00 JST 跑一次. staff 通常不会高频改判定, 一天一次足够 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>1</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+</dict>
+</plist>
