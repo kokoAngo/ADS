@@ -57,6 +57,15 @@ WEIGHTS = {
     'market_rank': 0.20,
 }
 
+# 热门駅(反响/千供給 50-368, 平均的 10-60 倍)— findings/stations_costs.md Top 20
+HOT_STATIONS = {
+    '世田谷代田', '緑が丘', '千石', '若林', '京成小岩',
+    '雑司が谷', '東大前', '上北沢', '尾久', '千住大橋',
+    '自由が丘', '桜新町', '湯島', '大井町', '新中野',
+    '尾山台', '西大井', '不動前', '東十条', '四谷三丁目',
+}
+HOT_STATION_BONUS = 0.3   # 物件最寄駅 ∈ HOT_STATIONS → 推薦点数 +0.3
+
 DATA_DIR = Path("data")
 BLACKLIST_FILE = DATA_DIR / "blacklist_companies.txt"
 WHITELIST_FILE = DATA_DIR / "whitelist_companies.txt"
@@ -957,7 +966,7 @@ def _kwd_count_listings(page, building_name, target_rent_man, target_area_sqm):
 # ============================================================
 # Step 6: 推薦点数计算
 # ============================================================
-def calculate_recommendation(view, inquiry, ad_count):
+def calculate_recommendation(view, inquiry, ad_count, station=None):
     norm_view = min(view / 10, 1.0) * 10
     norm_inquiry = min(inquiry / 5, 1.0) * 10
     competition = max(0, 10 - (ad_count - 1) * 0.5) if ad_count else 5.0
@@ -968,6 +977,11 @@ def calculate_recommendation(view, inquiry, ad_count):
         competition * WEIGHTS['competition'] +
         market * WEIGHTS['market_rank']
     )
+    # 热门駅加分 (findings T1-6)
+    if station:
+        normalized = station.rstrip("駅").strip()
+        if normalized in HOT_STATIONS:
+            total += HOT_STATION_BONUS
     return round(total, 2)
 
 
@@ -1075,10 +1089,15 @@ def process_property(prop_data, browser_page, browser_context):
     except Exception as e:
         log(f"  広告数 异常: {str(e)[:80]}")
 
-    # Step 7: 推薦点数
-    score = calculate_recommendation(view, inquiry, ad_count)
+    # Step 7: 推薦点数 (含热门駅加分)
+    station = prop_data.get("station", "")
+    is_hot = bool(station and station.rstrip("駅").strip() in HOT_STATIONS)
+    score = calculate_recommendation(view, inquiry, ad_count, station=station)
     notion_update(page_id, {"推薦点数": {"number": score}})
-    log(f"  推薦点数: {score}")
+    if is_hot:
+        log(f"  ⭐ HOT 駅 ({station}) → score +{HOT_STATION_BONUS} → {score}")
+    else:
+        log(f"  推薦点数: {score}")
 
     # Step 8: 实时写入TOP表 (含高竞争预过滤)
     if score >= RECOMMEND_THRESHOLD:
