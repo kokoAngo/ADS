@@ -60,6 +60,7 @@ launchd: jp.ango.archiverecommendations
 |---|---|---|---|
 | `VIEW_THRESHOLD` | 6.0 | `process_pipeline.py:42` | view < 此值跳过完整流程(low_view) |
 | `RECOMMEND_THRESHOLD` | 5.8 | `process_pipeline.py:46` | 推薦点数 ≥ 此值才进 TOP 表(原 6.5,2026-04-25 调降) |
+| `MAX_COMPETITION_FOR_ENTRY` | 5 | `process_pipeline.py:47` | 写 TOP 前 SUUMO 中介数 > 此值就跳过(高竞争红海过滤) |
 | `WORKER_COUNT` | 3 | `process_pipeline.py:73` | pipeline 并发度,可用 env override |
 | `CUTOFF_HOURS` | [11,15,19,23] | 同上 + workflow_trigger.py | JST 整点 |
 | `CUTOFF_MINUTE` | 0 | 同上 | 曾试 5,11:00–11:05 物件被夹缝丢失,已回退 |
@@ -148,5 +149,6 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 - **2026-04-27** 確認待ち物件 DB 加 `会社広告可否` 列 + `sync_company_lists.py` + launchd `jp.ango.synccompanylists`(staff 顺手填判定 → 自动同步到名单)
 - **2026-04-27** TOP DB 移除 `MAX_RECOMMENDATIONS=20` 上限; 加 `取下待ち` / `取下済`(両 DB 统一终态) Status; `add_to_top_db` dedup 改单点查询; watch_registrations 改用 active_statuses allowlist; 新增 `archive_old_recommendations.py` + launchd `jp.ango.archiverecommendations` 周归档终态老 row。这套改动是为接下来的"广告投放生命周期"项目准备的基础设施(支持 D3 撤退 / 登録店舗数 阈值撤退 / A/B 反响归因)。
 - **2026-04-27** watch_registrations 加自动撤退判定: 登録店舗数 ≥ 10 OR 公開日時 ≥ 3 天 → 自动设 Status=取下待ち。注意 公開日時 是 pipeline 写入 TOP 表的日期,不严格等于 ad-script 投放日(通常差 1 天内,可接受)。
+- **2026-04-27** process_pipeline 写 TOP 前加高竞争预过滤: 用 SUUMO kwd 搜索, 已被 > 5 家中介公开 → 跳过 (return "high_competition")。复用 watch_registrations 的 kwd 搜索代码 (复制到 _kwd_* 前缀, 两边独立维护)。新写入 TOP 行的「登録店舗数」字段一进就有值。
 
 完整 git 历史: `git log --oneline` 在分支 `mac开发版1.0`(GitHub remote: `kokoAngo/ADS`)

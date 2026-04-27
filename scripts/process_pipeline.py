@@ -44,6 +44,7 @@ CUTOFF_MINUTE = 0
 # 阈值
 VIEW_THRESHOLD = 6.0           # view < 此值跳过后续步骤
 RECOMMEND_THRESHOLD = 5.8      # 推薦点数 >= 此值才写入TOP表
+MAX_COMPETITION_FOR_ENTRY = 5  # SUUMO 上已被 > 此值家中介公开的物件 → 不写入 TOP 表(高竞争跳过)
 # 注: 之前有 MAX_RECOMMENDATIONS=20 的滚动上限, 2026-04-27 移除以支持广告生命周期跟踪
 # (满 20 时自动 archive 最老一条 → 但可能 archive 掉还在投放中的 row → ad-script 失联)
 # 现在 TOP DB 不限大小, 由 scripts/archive_old_recommendations.py 周期归档终态老 row
@@ -867,6 +868,93 @@ def query_ad_count(page, context, prop):
 
 
 # ============================================================
+# SUUMO kwd 关键字搜索 (写 TOP 前的高竞争预过滤)
+# 注: 这段是 watch_registrations.py:count_suumo_listings 的副本,
+# 用户决策 (2026-04-27) 两边独立维护, 改一边不影响另一边。
+# 如需修复 SUUMO 页面变化, 两处都要同步改。
+# ============================================================
+KWD_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=040&ta=13"
+KWD_RENT_TOL_MAN = 0.5
+KWD_AREA_TOL_M2 = 2.0
+
+
+def _kwd_normalize_name(name):
+    """物件名清洗: 去括号读み + 去尾部号室 + 多空格压一格"""
+    if not name:
+        return ""
+    # 去全角/半角括号内容
+    name = re.sub(r"（[^）]*）", "", name)
+    name = re.sub(r"\([^)]*\)", "", name)
+    # 去尾部的「XXX号室」(全/半角数字和漢数字)
+    name = re.sub(r"[\s　]?[\dO〇零一二三四五六七八九十百千０-９]+\s*号\s*室\s*$", "", name)
+    # 多余空格压缩(保留至少一个 半角空格, 复数空格 → 单个)
+    name = re.sub(r"[\s　]{2,}", " ", name)
+    return name.strip()
+
+
+def _kwd_parse_cassette(text):
+    """从 cassette inner_text 提取 rent_man 和 area_sqm"""
+    rent_m = re.search(r"賃料[:：]\s*([\d.]+)\s*万", text)
+    area_m = re.search(r"専有面積[:：]\s*([\d.]+)\s*m", text)
+    rent = float(rent_m.group(1)) if rent_m else None
+    area = float(area_m.group(1)) if area_m else None
+    return rent, area
+
+
+def _kwd_count_listings(page, building_name, target_rent_man, target_area_sqm):
+    """
+    用物件名做 SUUMO kwd 搜索, 按 rent±KWD_RENT_TOL & area±KWD_AREA_TOL 过滤,
+    返回过滤后件数 = 当前已公开此房间的中介数。无结果 0, 出错 None。
+    """
+    keyword = _kwd_normalize_name(building_name)
+    if not keyword:
+        return None
+
+    try:
+        page.goto(KWD_SEARCH_URL, timeout=30000)
+        time.sleep(1.5)
+
+        kwd_input = page.locator('input[name="kwd"]').first
+        if kwd_input.count() == 0:
+            log(f"    kwd 搜索: 找不到 input[name=kwd]")
+            return None
+        kwd_input.fill(keyword)
+        time.sleep(0.3)
+        kwd_input.press("Enter")
+
+        page.wait_for_url("**/JJ901FC001/**", timeout=15000)
+        time.sleep(1.5)
+
+        body = page.locator("body").inner_text()
+        total_m = re.search(r"物件\s*\n?\s*([\d,]+)\s*件\s*\n?\s*検索条件", body)
+        total = int(total_m.group(1).replace(",", "")) if total_m else 0
+        if total == 0:
+            return 0
+
+        cassettes = page.locator(".cassettebox").all()
+        matched = 0
+        for c in cassettes:
+            try:
+                text = c.inner_text()
+                rent_c, area_c = _kwd_parse_cassette(text)
+                if rent_c is None or area_c is None:
+                    continue
+                if abs(rent_c - target_rent_man) > KWD_RENT_TOL_MAN:
+                    continue
+                if abs(area_c - target_area_sqm) > KWD_AREA_TOL_M2:
+                    continue
+                matched += 1
+            except Exception:
+                continue
+
+        return matched
+
+    except Exception as e:
+        log(f"    kwd_count 异常: {str(e)[:80]}")
+        return None
+
+
+# ============================================================
 # Step 6: 推薦点数计算
 # ============================================================
 def calculate_recommendation(view, inquiry, ad_count):
@@ -895,8 +983,9 @@ def reins_id_exists_in_top(db_id, reins_id):
     return len(hits) > 0
 
 
-def add_to_top_db(db_id, db_name, prop):
-    """物件实时添加到 TOP DB. 去重(REINS_ID 已存在则跳过), 不再有大小上限"""
+def add_to_top_db(db_id, db_name, prop, listing_count=None):
+    """物件实时添加到 TOP DB. 去重(REINS_ID 已存在则跳过), 不再有大小上限。
+    listing_count: 写入时同步设置「登録店舗数」字段(免得 watch_registrations 2h 后才填)"""
     with _notion_lock:
         if reins_id_exists_in_top(db_id, prop["reins_id"]):
             return False  # 已存在
@@ -909,9 +998,12 @@ def add_to_top_db(db_id, db_name, prop):
             "公開日時": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}},
             "Status": {"status": {"name": "広告待ち"}}
         }
+        if listing_count is not None:
+            properties["登録店舗数"] = {"number": int(listing_count)}
 
         if notion_create(db_id, properties):
-            log(f"    → 写入 {db_name}: {prop['reins_id']} ({prop['score']}分)")
+            extra = f" 登録店舗数={listing_count}" if listing_count is not None else ""
+            log(f"    → 写入 {db_name}: {prop['reins_id']} ({prop['score']}分){extra}")
             return True
         return False
 
@@ -988,18 +1080,33 @@ def process_property(prop_data, browser_page, browser_context):
     notion_update(page_id, {"推薦点数": {"number": score}})
     log(f"  推薦点数: {score}")
 
-    # Step 8: 实时写入TOP表
+    # Step 8: 实时写入TOP表 (含高竞争预过滤)
     if score >= RECOMMEND_THRESHOLD:
-        top_prop = {
-            "reins_id": rid,
-            "score": score,
-            "building_name": prop_data.get("building_name", ""),
-            "management_company": company
-        }
+        target = None
         if ad_status == "可":
-            add_to_top_db(RECOMMEND_DATABASE_ID, "新着物件おすすめ", top_prop)
+            target = (RECOMMEND_DATABASE_ID, "新着物件おすすめ")
         elif ad_status == "確認待ち":
-            add_to_top_db(PENDING_DATABASE_ID, "確認待ち物件", top_prop)
+            target = (PENDING_DATABASE_ID, "確認待ち物件")
+
+        if target:
+            # 高竞争预过滤: 用 SUUMO kwd 搜索看已有几家中介公开了此房间
+            listing_count = _kwd_count_listings(
+                browser_page,
+                prop_data.get("building_name", ""),
+                prop_data.get("rent", 0) / 10000,
+                prop_data.get("area_sqm", 0) or 0,
+            )
+            if listing_count is not None and listing_count > MAX_COMPETITION_FOR_ENTRY:
+                log(f"  ⚠ SUUMO 中介数 {listing_count} > {MAX_COMPETITION_FOR_ENTRY}, 跳过写 TOP 表 (高竞争)")
+                return "high_competition"
+
+            top_prop = {
+                "reins_id": rid,
+                "score": score,
+                "building_name": prop_data.get("building_name", ""),
+                "management_company": company
+            }
+            add_to_top_db(target[0], target[1], top_prop, listing_count=listing_count)
 
     return "success"
 
@@ -1128,7 +1235,7 @@ def main():
     enqueued = _fill_queue(work_queue, pages)
     log(f"入队: {enqueued} 个")
 
-    stats = {"success": 0, "low_view": 0, "unallowed": 0, "no_rent": 0, "error": 0}
+    stats = {"success": 0, "low_view": 0, "unallowed": 0, "high_competition": 0, "no_rent": 0, "error": 0}
     stop_event = threading.Event()
 
     log(f"\n启动 {WORKER_COUNT} 个并发 Playwright worker (headless, 资源拦截开启)...")
