@@ -66,6 +66,8 @@ launchd: jp.ango.archiverecommendations
 | `POLL_INTERVAL` | 10*60 | `workflow_trigger.py:58` | Notion 轮询间隔(秒) |
 | `RENT_TOL_MAN` | 0.5 | `watch_registrations.py:54` | 同房间过滤容差(万円) |
 | `AREA_TOL_M2` | 2.0 | 同上 | 同房间过滤容差(m²) |
+| `RETIRE_BY_LISTING_COUNT` | 10 | `watch_registrations.py:58` | 登録店舗数 ≥ 此值自动设 Status=取下待ち |
+| `RETIRE_BY_AGE_DAYS` | 3 | `watch_registrations.py:59` | 公開日時 距今 ≥ 此天数自动设 Status=取下待ち(无论反响) |
 | `ARCHIVE_AFTER_DAYS` | 30 | `archive_old_recommendations.py:39` | TOP 表终态 row 多久后软归档 |
 
 **注**: TOP DB **不再有大小上限**(原 `MAX_RECOMMENDATIONS=20` 于 2026-04-27 移除)。改由 `archive_old_recommendations.py` 周期归档终态老 row, 让 ad-script 能完整跟踪生命周期不被新进物件顶掉。
@@ -82,7 +84,12 @@ launchd: jp.ango.archiverecommendations
 
 **確認待ち物件**多一个 `会社広告可否(select)` 列:可 / 不可 / 物件による (空) — staff 顺手填这个列, sync_company_lists.py 会同步到 .txt/.csv,下次 pipeline 该公司就不再 確認待ち
 
-**`取下待ち` Status 协议**: pipeline 不主动设此 status, 由 staff 或未来撤退判定脚本设。ad-script 看到此 status → 在 SUUMO 撤下广告 → 改 Status 为终态(おすすめ→取下済 / 確認待ち→広告済)。这是 ad-script 跟我们这边脚本之间的字符串契约,改名要双方同步。
+**`取下待ち` Status 协议**: ad-script 看到此 status → 在 SUUMO 撤下广告 → 改 Status 为终态 `取下済`(两个 DB 都用 取下済)。
+
+**谁设 `取下待ち`**:
+1. `watch_registrations.py` 自动判定:登録店舗数 ≥ 10 OR 公開日時 距今 ≥ 3 天
+2. staff 手动(在 Notion UI 直接选)
+3. 未来更复杂的判定脚本(D3 反响零撤、score 重评等,A/B 文档里提的)
 
 ## 运维命令
 
@@ -139,6 +146,7 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 - **2026-04-24** watch_registrations 扩展到 確認待ち物件 DB(per-DB skip_statuses 配置)
 - **2026-04-25** `RECOMMEND_THRESHOLD` 6.5 → 5.8(原阈值 TOP 表录入太少)
 - **2026-04-27** 確認待ち物件 DB 加 `会社広告可否` 列 + `sync_company_lists.py` + launchd `jp.ango.synccompanylists`(staff 顺手填判定 → 自动同步到名单)
-- **2026-04-27** TOP DB 移除 `MAX_RECOMMENDATIONS=20` 上限; 加 `取下待ち` Status; `add_to_top_db` dedup 改单点查询; watch_registrations 改用 active_statuses allowlist; 新增 `archive_old_recommendations.py` + launchd `jp.ango.archiverecommendations` 周归档终态老 row。这套改动是为接下来的"广告投放生命周期"项目准备的基础设施(支持 D3 撤退 / 登録店舗数 阈值撤退 / A/B 反响归因)。
+- **2026-04-27** TOP DB 移除 `MAX_RECOMMENDATIONS=20` 上限; 加 `取下待ち` / `取下済`(両 DB 统一终态) Status; `add_to_top_db` dedup 改单点查询; watch_registrations 改用 active_statuses allowlist; 新增 `archive_old_recommendations.py` + launchd `jp.ango.archiverecommendations` 周归档终态老 row。这套改动是为接下来的"广告投放生命周期"项目准备的基础设施(支持 D3 撤退 / 登録店舗数 阈值撤退 / A/B 反响归因)。
+- **2026-04-27** watch_registrations 加自动撤退判定: 登録店舗数 ≥ 10 OR 公開日時 ≥ 3 天 → 自动设 Status=取下待ち。注意 公開日時 是 pipeline 写入 TOP 表的日期,不严格等于 ad-script 投放日(通常差 1 天内,可接受)。
 
 完整 git 历史: `git log --oneline` 在分支 `mac开发版1.0`(GitHub remote: `kokoAngo/ADS`)

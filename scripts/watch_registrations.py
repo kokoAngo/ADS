@@ -60,6 +60,10 @@ SUUMO_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=04
 RENT_TOL_MAN = 0.5     # 万円
 AREA_TOL_M2 = 2.0      # m2
 
+# 自动撤退判定 (设 Status=取下待ち, ad-script 看到后会撤掉广告)
+RETIRE_BY_LISTING_COUNT = 10   # 登録店舗数 ≥ 此值 → 取下待ち (竞争太多, 浪费枠)
+RETIRE_BY_AGE_DAYS = 3         # 公開日時 + 此天数 < 今日 → 取下待ち (无论有无反响, 投放够久就撤)
+
 LOG_FILE = Path("logs") / "watch_registrations.log"
 LOG_FILE.parent.mkdir(exist_ok=True)
 
@@ -270,25 +274,54 @@ def count_suumo_listings(page, building_name, target_rent_man, target_area_sqm):
 # ============================================================
 # Main
 # ============================================================
+def _days_since(date_str):
+    """date_str: YYYY-MM-DD 或 ISO datetime。返回距今天数(基于本地日期),无效返回 None"""
+    if not date_str:
+        return None
+    try:
+        d = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return (datetime.now().date() - d).days
+
+
 def process_one(item, browser_page):
     reins_id = item["reins_id"]
     page_id = item["page_id"]
     name = item["building_name"]
+    koukai_date = item.get("koukai_date", "")
 
+    # 撤退判定 1: 投放年龄 ≥ RETIRE_BY_AGE_DAYS 天 → 直接撤, 不必再查 SUUMO
+    age_days = _days_since(koukai_date)
+    if age_days is not None and age_days >= RETIRE_BY_AGE_DAYS:
+        log(f"  ⚠ 公開日時={koukai_date} (距今 {age_days} 天 ≥ {RETIRE_BY_AGE_DAYS}) → 取下待ち")
+        notion_update(page_id, {"Status": {"status": {"name": "取下待ち"}}})
+        return "retire_by_age"
+
+    # 拉物件详情用于 SUUMO 搜索
     details = fetch_property_details(reins_id)
     if not details:
         log(f"  ✗ MAIN DB 无该 REINS_ID 或缺 rent/area")
         notion_update(page_id, {"登録店舗数": {"number": 0}})
         return "skip_no_data"
 
-    log(f"  物件名: {name} | 賃料: {details['rent_man']}万 | 面積: {details['area_sqm']}m2")
+    log(f"  物件名: {name} | 賃料: {details['rent_man']}万 | 面積: {details['area_sqm']}m2 | 公開={koukai_date} ({age_days}天)")
     count = count_suumo_listings(browser_page, name,
                                   details["rent_man"], details["area_sqm"])
 
     value = int(count) if count and count > 0 else 0
-    ok = notion_update(page_id, {"登録店舗数": {"number": value}})
+    update_props = {"登録店舗数": {"number": value}}
+
+    # 撤退判定 2: 登録店舗数 ≥ RETIRE_BY_LISTING_COUNT → 取下待ち
+    if value >= RETIRE_BY_LISTING_COUNT:
+        update_props["Status"] = {"status": {"name": "取下待ち"}}
+        log(f"  ⚠ 登録店舗数={value} ≥ {RETIRE_BY_LISTING_COUNT} → 同时设 Status=取下待ち")
+
+    ok = notion_update(page_id, update_props)
     if not ok:
         return "update_failed"
+    if value >= RETIRE_BY_LISTING_COUNT:
+        return "retire_by_count"
     if value > 0:
         log(f"  → 登録店舗数: {value}")
         return "success"
@@ -298,7 +331,7 @@ def process_one(item, browser_page):
 
 def collect_items(db_label, db_id, active_statuses):
     """
-    从一个推荐 DB 取出活跃 row, 附带来源 DB 名称。
+    从一个推荐 DB 取出活跃 row, 附带来源 DB 名称、公開日時(用于年龄判定)。
     active_statuses: 要保留的 Status 名称列表 (allowlist)。空列表会拉全表 (兼容用, 不建议)。
     """
     log(f"查询 {db_label} ({db_id})...")
@@ -317,12 +350,21 @@ def collect_items(db_label, db_id, active_statuses):
         name = ""
         if props.get("物件名", {}).get("rich_text"):
             name = props["物件名"]["rich_text"][0]["plain_text"]
+        # 公開日時: 用于年龄判定。pipeline 写入时设为当日, ad-script 投放时也可能更新
+        koukai = ""
+        koukai_obj = props.get("公開日時", {}).get("date")
+        if koukai_obj:
+            koukai = koukai_obj.get("start", "")
+        # 兜底: 如果没有 公開日時, 用 created_time
+        if not koukai:
+            koukai = p.get("created_time", "")[:10]   # 取 YYYY-MM-DD
         if reins_id and name:
             items.append({
                 "page_id": p["id"],
                 "reins_id": reins_id,
                 "building_name": name,
                 "source_db": db_label,
+                "koukai_date": koukai,   # YYYY-MM-DD
             })
     suffix = f" (Status ∈ {'/'.join(active_statuses)})" if active_statuses else " (全表)"
     log(f"  → {len(items)} 件{suffix}")
@@ -357,7 +399,9 @@ def main():
     context.route("**/*", _route_filter)
     page = context.new_page()
 
-    stats = {"success": 0, "not_found": 0, "skip_no_data": 0, "update_failed": 0, "error": 0}
+    stats = {"success": 0, "not_found": 0,
+             "retire_by_age": 0, "retire_by_count": 0,
+             "skip_no_data": 0, "update_failed": 0, "error": 0}
 
     try:
         for i, item in enumerate(all_items):

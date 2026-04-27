@@ -38,9 +38,10 @@ sys.stdout.reconfigure(line_buffering=True)
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 
 # (显示名, DB ID, 终态 Status 列表)
+# 终态 = ad-script 撤下后设置的 Status,该 row 不会再被 watch_registrations 监视
 TARGET_DATABASES = [
     ("新着物件おすすめ", "3171c1974dad80439367df13aa67f012", ["取下済"]),
-    ("確認待ち物件",      "3181c1974dad80279cb7dfdeb92b946f", ["広告済"]),
+    ("確認待ち物件",      "3181c1974dad80279cb7dfdeb92b946f", ["取下済"]),
 ]
 
 ARCHIVE_AFTER_DAYS = int(os.getenv("ARCHIVE_AFTER_DAYS", "30"))
