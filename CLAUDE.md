@@ -1,0 +1,122 @@
+# Fango ADS — 项目快照(给未来的 Claude 看)
+
+## 一段话项目说明
+
+REINS(物件流通)上的物件每天 4 个时段(11/15/19/23 JST)集中投到 Notion。系统对每个物件做评分(view 预测 / 反响数 / 市場順位 / 広告数)→ 高分物件写入 TOP DB → 在 SUUMO 上自动追踪有多少中介公开了同一房间(竞争监视)。
+
+业务流:
+```
+REINS → Notion (MAIN DB)
+       ↓ 评估 pipeline
+       → 新着物件おすすめ DB / 確認待ち物件 DB
+              ↓ 独立监视服务(每 2h)
+              → 「登録店舗数」字段
+```
+
+## 服务架构
+
+```
+workflow_trigger.py  (daemon, nohup 启动)
+  ├── 4 种触发: trigger flag 文件 / Notion 10min 轮询 / cutoff 到达 / sleep 恢复
+  └── 每次触发 → subprocess spawn process_pipeline.py
+                  └── 3 worker 并发 + 各自 Playwright headless + 资源拦截
+
+launchd: jp.ango.watchregistrations  (~/Library/LaunchAgents/)
+  └── 每天 12 次 (0:30, 2:30, …, 22:30 JST) → watch_registrations.py
+```
+
+## 关键文件(只看这几个就够)
+
+| 文件 | 角色 |
+|---|---|
+| `scripts/workflow_trigger.py` | daemon, 监听+触发 |
+| `scripts/process_pipeline.py` | 评估 pipeline 主体(全部业务逻辑在这) |
+| `scripts/watch_registrations.py` | 独立的中介数监视(SUUMO kwd 搜索) |
+| `scripts/launchd/jp.ango.watchregistrations.plist` | launchd 调度模板 |
+| `config.py` | SUUMO 登录 + DB URL |
+| `.env` / `.env.example` | NOTION_API_KEY / SUUMO_USERNAME / REINS 等 |
+
+> `scripts/` 下还有 30+ 个 `train_*` / `predict_*` / `scrape_*` 是训练/调试/历史脚本,**生产路径只有上面 3 个 .py**。
+
+## 时间逻辑
+
+- **Cutoffs (JST)**: 11:00 / 15:00 / 19:00 / 23:00 — REINS 集中投稿时刻,daemon 时刻一到立即触发 pipeline
+- **Notion 轮询**: 每 10 分钟一次, 中间空轮跳过(检查 `予測_view数=空 AND created_time > 最近 cutoff`)
+- **launchd 监视**: 每 2 小时, 在 :30 错峰避开整点 cutoff
+
+## 关键常数(改这些就影响业务)
+
+| 常数 | 值 | 在哪 | 含义 |
+|---|---|---|---|
+| `VIEW_THRESHOLD` | 6.0 | `process_pipeline.py:42` | view < 此值跳过完整流程(low_view) |
+| `RECOMMEND_THRESHOLD` | 5.8 | `process_pipeline.py:46` | 推薦点数 ≥ 此值才进 TOP 表(原 6.5,2026-04-25 调降) |
+| `WORKER_COUNT` | 3 | `process_pipeline.py:73` | pipeline 并发度,可用 env override |
+| `CUTOFF_HOURS` | [11,15,19,23] | 同上 + workflow_trigger.py | JST 整点 |
+| `CUTOFF_MINUTE` | 0 | 同上 | 曾试 5,11:00–11:05 物件被夹缝丢失,已回退 |
+| `POLL_INTERVAL` | 10*60 | `workflow_trigger.py:58` | Notion 轮询间隔(秒) |
+| `RENT_TOL_MAN` | 0.5 | `watch_registrations.py:54` | 同房间过滤容差(万円) |
+| `AREA_TOL_M2` | 2.0 | 同上 | 同房间过滤容差(m²) |
+
+## Notion DB 速查
+
+| DB | ID | Status 选项 | 备注 |
+|---|---|---|---|
+| MAIN(全物件) | `3031c197-4dad-800b-917d-d09b8602ec39` | — | 物件原始库, 字段最全 |
+| 新着物件おすすめ TOP | `3171c1974dad80439367df13aa67f012` | 広告待ち / 掲載保留 / 掲載指示済み / **取下済** / 要確認 | 広告可==「可」的高分 |
+| 確認待ち物件 TOP | `3181c1974dad80279cb7dfdeb92b946f` | 広告待ち / 広告済 / To-do / In progress / Complete | 広告可==「確認待ち」的高分(无「取下済」) |
+
+共同字段: `REINS_ID(title)`, `物件名(rich_text)`, `推薦点数(number)`, `Status(status)`, `登録店舗数(number)`, `公開日時(date)`
+
+## 运维命令
+
+```bash
+# 启 daemon
+cd /Users/developer_recika/Fango/ADS && . venv/bin/activate && \
+  nohup python scripts/workflow_trigger.py > logs/workflow_trigger.stdout.log 2>&1 & disown
+
+# 停 daemon
+kill $(pgrep -f workflow_trigger.py)
+
+# 手动触发 pipeline(立即, 不等下次 cutoff/轮询)
+echo "manual $(date)" > trigger/run_workflow.flag
+
+# launchd 状态
+launchctl list | grep ango
+
+# launchd 手动跑一次
+launchctl start jp.ango.watchregistrations
+
+# 重新注册 launchd(改了 plist 后)
+launchctl unload ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
+launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
+```
+
+主要日志:
+- `logs/process_pipeline.log` — pipeline 每件物件的细节
+- `logs/workflow_trigger.log` — daemon 触发记录
+- `logs/watch_registrations.log` — 监视服务每次扫描
+- `logs/watch_registrations.launchd.log` — launchd 启动 stdout/stderr
+
+## 已知陷阱(改代码前必读)
+
+- **`workflow_trigger.py` 必须显式 `load_dotenv()`** — daemon 不靠 shell 环境继承 token, 否则轮询持续 401, 但日志会显示"没有新物件需要评估"误导。**修复点已加, 别再删**
+- **SUUMO 关键字搜索用 form 字段 `kwd`(填后回车), 不是 URL `?kw=`** — URL 参数被忽略, 会返回所有结果(1.7M)假装匹配
+- **物件名清洗很关键**: 去尾部「数字 + 号室」(全/半角数字 + 漢数字), 去括号内读み「(マハロテラス)」, **保留全角空格**(SUUMO 搜索需要分词)
+- **macOS 首次写 crontab 触发 Full Disk Access 弹窗会被 dontAsk 模式吞掉** — 已改用 launchd plist 避开
+- **Pipeline 完成后 daemon 会被 sleep-detection 误触发跑空轮** — subprocess.run 阻塞 > 60 秒(SLEEP_DETECT_THRESHOLD), 主线程返回时被认为"系统刚醒",空跑 ~15 秒。**已知未修**, 影响很小
+- **「不可(仲介)」物件 Step 3 早退** — return "unallowed" 跳过 SUUMO 抓取(否则浪费 60 秒/件)。理由: 不可物件无论多高分都不进 TOP, 抓 SUUMO 只是装饰
+- **Notion DB 的 Status 选项 per-DB 不同** — `取下済` 只存在于 新着物件おすすめ。`watch_registrations.py` 用 `(label, id, skip_statuses)` 三元组解决
+- **Pickle/XGBoost 兼容性警告** — pickle 跨 xgboost 版本会出 UserWarning 但仍能 unpickle, 不影响运行。下次模型重训用 `model.save_model()` 更稳
+
+## 最近改动时间线(mac开发版1.0 + 后续)
+
+- **2026-04-21** Windows → macOS 移植: D:\ 路径硬编码全清(26 文件), ctypes.windll → caffeinate, 16 文件去 Notion token 硬编码 fallback, requirements 补 4 个依赖
+- **2026-04-21** Pipeline 并发化: 单线程 → 3 worker(实测吞吐 ~1.4 件/分 → ~10 件/分), 加资源拦截(image/css/font abort), 不可仲介 Step 3 早退
+- **2026-04-21** workflow_trigger 加 `load_dotenv()` 修复 401 灾难
+- **2026-04-22** 新增 `watch_registrations.py` + launchd 调度(每 2h 扫 TOP DB 数 SUUMO 中介数)
+- **2026-04-22** SUUMO 搜索从沿線過滤路径切换到 kwd 关键字搜索(更稳, 不依赖 RAILWAY_STATIONS 字典)
+- **2026-04-22** 物件名清洗(号室后缀 + 括号读み)
+- **2026-04-24** watch_registrations 扩展到 確認待ち物件 DB(per-DB skip_statuses 配置)
+- **2026-04-25** `RECOMMEND_THRESHOLD` 6.5 → 5.8(原阈值 TOP 表录入太少)
+
+完整 git 历史: `git log --oneline` 在分支 `mac开发版1.0`(GitHub remote: `kokoAngo/ADS`)
