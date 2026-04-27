@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>jp.ango.archiverecommendations</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/developer_recika/Fango/ADS/venv/bin/python</string>
+        <string>/Users/developer_recika/Fango/ADS/scripts/archive_old_recommendations.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/developer_recika/Fango/ADS</string>
+
+    <!-- 默认软归档执行模式 (DRY_RUN=0) -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DRY_RUN</key>
+        <string>0</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/developer_recika/Fango/ADS/logs/archive_old_recommendations.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/developer_recika/Fango/ADS/logs/archive_old_recommendations.launchd.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- 每周日 02:00 JST 跑一次 (Weekday=0 是日曜) -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key><integer>0</integer>
+        <key>Hour</key><integer>2</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+</dict>
+</plist>

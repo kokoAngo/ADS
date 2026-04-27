@@ -45,10 +45,13 @@ sys.stdout.reconfigure(line_buffering=True)
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 MAIN_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"       # 全物件 DB
 # 需要扫描的推荐 DB(都有 REINS_ID / 物件名 / Status / 登録店舗数 字段)
-# 每项: (显示名, DB ID, 要跳过的 Status 列表)
+# 每项: (显示名, DB ID, 活跃 Status allowlist)
+# 只扫"活跃中"的 row, 跳过暂停/复查/终态/取下待ち(等撤下中也不再监视)
 TARGET_DATABASES = [
-    ("新着物件おすすめ", "3171c1974dad80439367df13aa67f012", ["取下済"]),
-    ("確認待ち物件",      "3181c1974dad80279cb7dfdeb92b946f", []),
+    ("新着物件おすすめ", "3171c1974dad80439367df13aa67f012",
+        ["広告待ち", "掲載指示済み"]),
+    ("確認待ち物件",      "3181c1974dad80279cb7dfdeb92b946f",
+        ["広告待ち", "広告済"]),
 ]
 
 SUUMO_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=040&ta=13"
@@ -293,17 +296,17 @@ def process_one(item, browser_page):
     return "not_found"
 
 
-def collect_items(db_label, db_id, skip_statuses):
+def collect_items(db_label, db_id, active_statuses):
     """
-    从一个推荐 DB 取出物件列表, 附带来源 DB 名称。
-    skip_statuses: 要跳过的 Status 名称列表, 空列表表示全表扫描。
+    从一个推荐 DB 取出活跃 row, 附带来源 DB 名称。
+    active_statuses: 要保留的 Status 名称列表 (allowlist)。空列表会拉全表 (兼容用, 不建议)。
     """
     log(f"查询 {db_label} ({db_id})...")
     filter_obj = None
-    if skip_statuses:
-        # 多个 skip 用 and 串联: Status 不等于每一个
-        conds = [{"property": "Status", "status": {"does_not_equal": s}} for s in skip_statuses]
-        filter_obj = {"and": conds} if len(conds) > 1 else conds[0]
+    if active_statuses:
+        # 多个 status 用 or 串联: Status 等于其中任一
+        conds = [{"property": "Status", "status": {"equals": s}} for s in active_statuses]
+        filter_obj = {"or": conds} if len(conds) > 1 else conds[0]
     pages = notion_query(db_id, filter_obj=filter_obj)
     items = []
     for p in pages:
@@ -321,7 +324,7 @@ def collect_items(db_label, db_id, skip_statuses):
                 "building_name": name,
                 "source_db": db_label,
             })
-    suffix = f" (已排除 Status={'/'.join(skip_statuses)})" if skip_statuses else " (全表)"
+    suffix = f" (Status ∈ {'/'.join(active_statuses)})" if active_statuses else " (全表)"
     log(f"  → {len(items)} 件{suffix}")
     return items
 
@@ -331,10 +334,10 @@ def main():
     log("Watch Registrations — 独立服务")
     log("=" * 60)
 
-    # 从多个推荐 DB 收集物件
+    # 从多个推荐 DB 收集活跃物件
     all_items = []
-    for db_label, db_id, skip_statuses in TARGET_DATABASES:
-        all_items.extend(collect_items(db_label, db_id, skip_statuses))
+    for db_label, db_id, active_statuses in TARGET_DATABASES:
+        all_items.extend(collect_items(db_label, db_id, active_statuses))
 
     log(f"\n合计待处理: {len(all_items)} 件")
 

@@ -52,3 +52,7 @@ trigger/run_workflow.flag
 # macOS venv
 venv/
 logs/
+
+# Analysis artifacts (zip, extracted findings 视情况单独决定要不要进 git)
+findings.zip
+findings/

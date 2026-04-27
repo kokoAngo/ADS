@@ -27,6 +27,10 @@ launchd: jp.ango.watchregistrations  (~/Library/LaunchAgents/)
 launchd: jp.ango.synccompanylists
   └── 每天 1 次 (01:00 JST) → sync_company_lists.py
        从「確認待ち物件 DB」的「会社広告可否」列同步 staff 判定 → blacklist/whitelist/case_by_case
+
+launchd: jp.ango.archiverecommendations
+  └── 每周日 1 次 (02:00 JST) → archive_old_recommendations.py
+       两个 TOP DB 里 Status 终态 + Created time > 30 天 的 row 软归档(archived=true)
 ```
 
 ## 关键文件(只看这几个就够)
@@ -37,6 +41,7 @@ launchd: jp.ango.synccompanylists
 | `scripts/process_pipeline.py` | 评估 pipeline 主体(全部业务逻辑在这) |
 | `scripts/watch_registrations.py` | 独立的中介数监视(SUUMO kwd 搜索) |
 | `scripts/sync_company_lists.py` | 把 staff 在 Notion 的判定同步到 blacklist/whitelist/case_by_case |
+| `scripts/archive_old_recommendations.py` | 终态 + 30 天后软归档 TOP DB row(防膨胀) |
 | `scripts/launchd/*.plist` | launchd 调度模板 |
 | `config.py` | SUUMO 登录 + DB URL |
 | `.env` / `.env.example` | NOTION_API_KEY / SUUMO_USERNAME / REINS 等 |
@@ -61,18 +66,23 @@ launchd: jp.ango.synccompanylists
 | `POLL_INTERVAL` | 10*60 | `workflow_trigger.py:58` | Notion 轮询间隔(秒) |
 | `RENT_TOL_MAN` | 0.5 | `watch_registrations.py:54` | 同房间过滤容差(万円) |
 | `AREA_TOL_M2` | 2.0 | 同上 | 同房间过滤容差(m²) |
+| `ARCHIVE_AFTER_DAYS` | 30 | `archive_old_recommendations.py:39` | TOP 表终态 row 多久后软归档 |
+
+**注**: TOP DB **不再有大小上限**(原 `MAX_RECOMMENDATIONS=20` 于 2026-04-27 移除)。改由 `archive_old_recommendations.py` 周期归档终态老 row, 让 ad-script 能完整跟踪生命周期不被新进物件顶掉。
 
 ## Notion DB 速查
 
 | DB | ID | Status 选项 | 备注 |
 |---|---|---|---|
 | MAIN(全物件) | `3031c197-4dad-800b-917d-d09b8602ec39` | — | 物件原始库, 字段最全 |
-| 新着物件おすすめ TOP | `3171c1974dad80439367df13aa67f012` | 広告待ち / 掲載保留 / 掲載指示済み / **取下済** / 要確認 | 広告可==「可」的高分 |
-| 確認待ち物件 TOP | `3181c1974dad80279cb7dfdeb92b946f` | 広告待ち / 広告済 / To-do / In progress / Complete | 広告可==「確認待ち」的高分(无「取下済」)|
+| 新着物件おすすめ TOP | `3171c1974dad80439367df13aa67f012` | 広告待ち / 掲載保留 / 掲載指示済み / **取下待ち** / 取下済 / 要確認 | 広告可==「可」的高分 |
+| 確認待ち物件 TOP | `3181c1974dad80279cb7dfdeb92b946f` | 広告待ち / 広告済 / **取下待ち** | 広告可==「確認待ち」的高分 |
 
 共同字段: `REINS_ID(title)`, `物件名(rich_text)`, `推薦点数(number)`, `Status(status)`, `登録店舗数(number)`, `公開日時(date)`
 
 **確認待ち物件**多一个 `会社広告可否(select)` 列:可 / 不可 / 物件による (空) — staff 顺手填这个列, sync_company_lists.py 会同步到 .txt/.csv,下次 pipeline 该公司就不再 確認待ち
+
+**`取下待ち` Status 协议**: pipeline 不主动设此 status, 由 staff 或未来撤退判定脚本设。ad-script 看到此 status → 在 SUUMO 撤下广告 → 改 Status 为终态(おすすめ→取下済 / 確認待ち→広告済)。这是 ad-script 跟我们这边脚本之间的字符串契约,改名要双方同步。
 
 ## 运维命令
 
@@ -92,6 +102,9 @@ launchctl list | grep ango
 
 # launchd 手动跑一次
 launchctl start jp.ango.watchregistrations
+launchctl start jp.ango.synccompanylists
+launchctl start jp.ango.archiverecommendations    # 默认 DRY_RUN=0 真归档
+DRY_RUN=1 ./venv/bin/python scripts/archive_old_recommendations.py  # 干跑 不真归档
 
 # 重新注册 launchd(改了 plist 后)
 launchctl unload ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
@@ -126,5 +139,6 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 - **2026-04-24** watch_registrations 扩展到 確認待ち物件 DB(per-DB skip_statuses 配置)
 - **2026-04-25** `RECOMMEND_THRESHOLD` 6.5 → 5.8(原阈值 TOP 表录入太少)
 - **2026-04-27** 確認待ち物件 DB 加 `会社広告可否` 列 + `sync_company_lists.py` + launchd `jp.ango.synccompanylists`(staff 顺手填判定 → 自动同步到名单)
+- **2026-04-27** TOP DB 移除 `MAX_RECOMMENDATIONS=20` 上限; 加 `取下待ち` Status; `add_to_top_db` dedup 改单点查询; watch_registrations 改用 active_statuses allowlist; 新增 `archive_old_recommendations.py` + launchd `jp.ango.archiverecommendations` 周归档终态老 row。这套改动是为接下来的"广告投放生命周期"项目准备的基础设施(支持 D3 撤退 / 登録店舗数 阈值撤退 / A/B 反响归因)。
 
 完整 git 历史: `git log --oneline` 在分支 `mac开发版1.0`(GitHub remote: `kokoAngo/ADS`)

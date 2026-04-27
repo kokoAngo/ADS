@@ -44,7 +44,9 @@ CUTOFF_MINUTE = 0
 # 阈值
 VIEW_THRESHOLD = 6.0           # view < 此值跳过后续步骤
 RECOMMEND_THRESHOLD = 5.8      # 推薦点数 >= 此值才写入TOP表
-MAX_RECOMMENDATIONS = 20       # TOP表上限
+# 注: 之前有 MAX_RECOMMENDATIONS=20 的滚动上限, 2026-04-27 移除以支持广告生命周期跟踪
+# (满 20 时自动 archive 最老一条 → 但可能 archive 掉还在投放中的 row → ad-script 失联)
+# 现在 TOP DB 不限大小, 由 scripts/archive_old_recommendations.py 周期归档终态老 row
 
 # 推薦点数权重
 WEIGHTS = {
@@ -882,32 +884,22 @@ def calculate_recommendation(view, inquiry, ad_count):
 
 
 # ============================================================
-# Step 7: 实时写入TOP表
+# Step 7: 实时写入TOP表 (无大小限制, 由 archive_old_recommendations.py 周期归档)
 # ============================================================
-def get_top_existing(db_id):
-    """获取TOP DB现有物件，按公開日时间升序（最早在前）"""
-    pages = notion_query(db_id, sorts=[{"property": "公開日時", "direction": "ascending"}])
-    existing = []
-    for p in pages:
-        rid = ""
-        if p["properties"].get("REINS_ID", {}).get("title"):
-            rid = p["properties"]["REINS_ID"]["title"][0]["plain_text"]
-        existing.append({"page_id": p["id"], "reins_id": rid})
-    return existing
+def reins_id_exists_in_top(db_id, reins_id):
+    """单点查询: TOP DB 里是否已有 REINS_ID 的活跃 row"""
+    hits = notion_query(db_id, filter_obj={
+        "property": "REINS_ID",
+        "title": {"equals": reins_id}
+    })
+    return len(hits) > 0
 
 
 def add_to_top_db(db_id, db_name, prop):
-    """物件实时添加到TOP DB（去重 + 满了删最早）"""
+    """物件实时添加到 TOP DB. 去重(REINS_ID 已存在则跳过), 不再有大小上限"""
     with _notion_lock:
-        existing = get_top_existing(db_id)
-        existing_ids = {e["reins_id"] for e in existing}
-
-        if prop["reins_id"] in existing_ids:
+        if reins_id_exists_in_top(db_id, prop["reins_id"]):
             return False  # 已存在
-
-        # 满了删最早
-        if len(existing) >= MAX_RECOMMENDATIONS:
-            notion_archive(existing[0]["page_id"])
 
         properties = {
             "REINS_ID": {"title": [{"text": {"content": prop["reins_id"]}}]},
