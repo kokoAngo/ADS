@@ -1,5 +1,7 @@
 # Fango ADS — 项目快照(给未来的 Claude 看)
 
+> 子系统深度文档 → [`skills/README.md`](skills/README.md) (5 个 workflow 各自一份)
+
 ## 一段话项目说明
 
 REINS(物件流通)上的物件每天 4 个时段(11/15/19/23 JST)集中投到 Notion。系统对每个物件做评分(view 预测 / 反响数 / 市場順位 / 広告数)→ 高分物件写入 TOP DB → 在 SUUMO 上自动追踪有多少中介公开了同一房间(竞争监视)。
