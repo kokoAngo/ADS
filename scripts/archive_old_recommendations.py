@@ -3,7 +3,7 @@
 """
 Archive Old Recommendations - 独立服务
 
-把两个 TOP DB 里 Status 是终态(取下済 / 広告済)且 Created time 距今超过
+把 おすすめ TOP DB 里 Status 是终态(取下済み / 広告掲載禁止)且 Created time 距今超过
 ARCHIVE_AFTER_DAYS 天的 row, 通过 Notion archive (软归档, archived=true)
 移到回收站, 保持 DB 体积可控。
 
@@ -37,11 +37,13 @@ sys.stdout.reconfigure(line_buffering=True)
 # ============================================================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 
-# (显示名, DB ID, 终态 Status 列表)
-# 终态 = ad-script 撤下后设置的 Status,该 row 不会再被 watch_registrations 监视
+# (显示名, DB ID, 终态 Status 列表 — 这些 row 30 天后软归档)
+# 2026-04-28 合并后只剩 1 张 TOP DB
+# 終态 = 取下済み (ad-script 撤完) + 広告掲載禁止 (staff 永禁)
+# 入稿失敗 不归档 — staff 要查异常,留着方便排错
 TARGET_DATABASES = [
-    ("新着物件おすすめ", "3171c1974dad80439367df13aa67f012", ["取下済"]),
-    ("確認待ち物件",      "3181c1974dad80279cb7dfdeb92b946f", ["取下済"]),
+    ("新着物件おすすめ", "3171c1974dad80439367df13aa67f012",
+        ["取下済み", "広告掲載禁止"]),
 ]
 
 ARCHIVE_AFTER_DAYS = int(os.getenv("ARCHIVE_AFTER_DAYS", "30"))

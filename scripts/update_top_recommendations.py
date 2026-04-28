@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# DEPRECATED 2026-04-28: 已被 process_pipeline.py 替代。
+# 仍引用废弃的 PENDING_DATABASE_ID (3181...) 和旧的 双 TOP DB 模型, 请勿手动跑。
 """
 更新TOP推荐物件到Notion数据库
 - 広告可=可 的物件 → 新着物件おすすめ (直接使用)

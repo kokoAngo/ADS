@@ -203,7 +203,7 @@ class WorkflowTriggerHandler(FileSystemEventHandler):
                     if "update_top_recommendations" in script_name and result.stdout:
                         for line in result.stdout.split('\n'):
                             # 记录关键信息
-                            if any(kw in line for kw in ['新着物件おすすめ:', '確認待ち物件:', '待添加:', '✓', '完成!']):
+                            if any(kw in line for kw in ['新着物件おすすめ:', '待添加:', '✓', '完成!']):
                                 logger.info(f"  {line.strip()}")
                 else:
                     logger.error(f"✗ {step_name} 失败")

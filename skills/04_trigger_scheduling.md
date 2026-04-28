@@ -149,5 +149,5 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 
 - [#1 物件评价](01_property_evaluation.md): daemon 触发的就是它
 - [#2 登録中介数](02_listing_count_watch.md): launchd 调度的 12 次/天
-- [#3 取下待ち/取下済](03_retire_lifecycle.md): launchd 调度归档的 1 次/周
+- [#3 要取り下げ/取下済み](03_retire_lifecycle.md): launchd 调度归档的 1 次/周
 - [#5 管理会社判定](05_company_classification.md): launchd 调度的 1 次/天

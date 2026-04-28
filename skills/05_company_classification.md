@@ -11,13 +11,13 @@
 | **黑名单** (不可仲介) | `data/blacklist_companies.txt` | 254 | `不可（仲介）` → Step 3 早退, 不写 TOP |
 | **白名单** (可) | `data/whitelist_companies.txt` | 220 | `可` → 进 `新着物件おすすめ` |
 | **case_by_case** (物件による) | `data/management_companies.csv` 中 `広告可否=='物件による'` | 41 | `物件による` → 不写 TOP(留 staff 判物件级) |
-| **未知** (默认) | (以上都不在) | — | `確認待ち` → 进 `確認待ち物件` 等 staff 判定 |
+| **未知** (默认) | (以上都不在) | — | `確認待ち` → 进 おすすめ DB, Status="確認待ち" 等 staff 判定 |
 
 ## 触发(谁更新名单)
 
 ```
 途径 1: staff 在 Notion 顺手填判定 (新)
-  └── staff 处理 確認待ち物件 DB 时, 顺便选 会社広告可否 (可/不可/物件による)
+  └── staff 处理 おすすめ DB 中 Status=確認待ち 的 row 时, 顺便选 会社広告可否 (可/不可/物件による)
       → 每天 01:00 JST sync_company_lists.py 同步到 .txt/.csv
 
 途径 2: 直接编辑 .txt / .csv (老办法)
@@ -90,11 +90,10 @@ def check_management(company_name):
 | Notion DB | 字段 | 类型 | 备注 |
 |---|---|---|---|
 | MAIN | `商号` | rich_text | 物件级管理会社名(Pipeline 抓的源) |
-| 確認待ち物件 | `管理会社` | rich_text | TOP 表里写的快照 |
-| 確認待ち物件 | **`会社広告可否`** | select | staff 顺手填: 可 / 不可 / 物件による (空=未填) |
-| 新着物件おすすめ | `会社広告可否` | (没有) | 该 DB 里公司已经确定为 "可", 无需再判 |
+| 新着物件おすすめ | `管理会社` | rich_text | TOP 表里写的快照 |
+| 新着物件おすすめ | **`会社広告可否`** | select | staff 顺手填: 可 / 不可 / 物件による (空=未填) |
 
-`会社広告可否` 只加到 確認待ち物件 DB(因为 おすすめ 的公司都已是「可」白名单)。
+`会社広告可否` 在 2026-04-28 合并后唯一 TOP DB(おすすめ)上。staff 主要看 Status=確認待ち 的 row 时填这一列。
 
 ## 失败模式 / Gotcha
 
@@ -107,5 +106,5 @@ def check_management(company_name):
 ## 关联工作流
 
 - [#1 物件评价](01_property_evaluation.md): Step 3 用本流程的 `check_management()` 决定 ad_status
-- [#3 取下待ち/取下済](03_retire_lifecycle.md): staff 处理 確認待ち 物件时顺手填判定,即在该 DB 上接合两个 workflow
+- [#3 要取り下げ/取下済み](03_retire_lifecycle.md): staff 处理 確認待ち 物件时顺手填判定,即在该 DB 上接合两个 workflow
 - [#4 触发调度](04_trigger_scheduling.md): launchd 每天 01:00 调度 sync 脚本

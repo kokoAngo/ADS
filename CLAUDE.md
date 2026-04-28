@@ -70,29 +70,41 @@ launchd: jp.ango.archiverecommendations
 | `POLL_INTERVAL` | 10*60 | `workflow_trigger.py:58` | Notion 轮询间隔(秒) |
 | `RENT_TOL_MAN` | 0.5 | `watch_registrations.py:54` | 同房间过滤容差(万円) |
 | `AREA_TOL_M2` | 2.0 | 同上 | 同房间过滤容差(m²) |
-| `RETIRE_BY_LISTING_COUNT` | 10 | `watch_registrations.py:58` | 登録店舗数 ≥ 此值自动设 Status=取下待ち |
-| `RETIRE_BY_AGE_DAYS` | 3 | `watch_registrations.py:59` | 公開日時 距今 ≥ 此天数自动设 Status=取下待ち(无论反响) |
+| `RETIRE_BY_LISTING_COUNT` | 10 | `watch_registrations.py:58` | 登録店舗数 ≥ 此值自动设 Status=要取り下げ |
+| `RETIRE_BY_AGE_DAYS` | 3 | `watch_registrations.py:59` | 公開日時 距今 ≥ 此天数自动设 Status=要取り下げ(无论反响) |
 | `ARCHIVE_AFTER_DAYS` | 30 | `archive_old_recommendations.py:39` | TOP 表终态 row 多久后软归档 |
 
 **注**: TOP DB **不再有大小上限**(原 `MAX_RECOMMENDATIONS=20` 于 2026-04-27 移除)。改由 `archive_old_recommendations.py` 周期归档终态老 row, 让 ad-script 能完整跟踪生命周期不被新进物件顶掉。
 
 ## Notion DB 速查
 
-| DB | ID | Status 选项 | 备注 |
-|---|---|---|---|
-| MAIN(全物件) | `3031c197-4dad-800b-917d-d09b8602ec39` | — | 物件原始库, 字段最全 |
-| 新着物件おすすめ TOP | `3171c1974dad80439367df13aa67f012` | 広告待ち / 掲載保留 / 掲載指示済み / **取下待ち** / 取下済 / 要確認 | 広告可==「可」的高分 |
-| 確認待ち物件 TOP | `3181c1974dad80279cb7dfdeb92b946f` | 広告待ち / 広告済 / **取下待ち** | 広告可==「確認待ち」的高分 |
+| DB | ID | 备注 |
+|---|---|---|
+| MAIN(全物件) | `3031c197-4dad-800b-917d-d09b8602ec39` | 物件原始库, 字段最全 |
+| 新着物件おすすめ TOP | `3171c1974dad80439367df13aa67f012` | **唯一 TOP DB** (2026-04-28 合并 確認待ち 进来) |
+| ~~確認待ち物件~~ | `3181c1974dad80279cb7dfdeb92b946f` | **2026-04-28 已废弃**, 122 行迁到おすすめ, 当前 0 行非归档 |
 
-共同字段: `REINS_ID(title)`, `物件名(rich_text)`, `推薦点数(number)`, `Status(status)`, `登録店舗数(number)`, `公開日時(date)`
+おすすめ 字段: `REINS_ID(title)` / `物件名(rich_text)` / `推薦点数(number)` / `管理会社(rich_text)` / `公開日時(date)` / `登録店舗数(number)` / `Status(status)` / `会社広告可否(select)`
 
-**確認待ち物件**多一个 `会社広告可否(select)` 列:可 / 不可 / 物件による (空) — staff 顺手填这个列, sync_company_lists.py 会同步到 .txt/.csv,下次 pipeline 该公司就不再 確認待ち
+おすすめ Status (3-2-3 group):
 
-**`取下待ち` Status 协议**: ad-script 看到此 status → 在 SUUMO 撤下广告 → 改 Status 为终态 `取下済`(两个 DB 都用 取下済)。
+| Group | Options |
+|---|---|
+| **To-do** | `確認待ち` / `広告待ち` / `掲載保留` |
+| **In progress** | `掲載指示済み` / `要取り下げ` |
+| **Complete** | `取下済み` / `入稿失敗` / `広告掲載禁止` |
 
-**watch_registrations 扫描范围**: 扫所有非终态 active row, 包括 staff 中间态(`掲載保留` / `要確認`)。**注**: staff 把 row 改成 `掲載保留` 不再代表"我手动暂停了别动"; 我们仍会监视, 一旦 登録店舗数 ≥ 10 或 公開日時 ≥ 3 天, 仍会自动设 `取下待ち`。这样防止暂停态 row 永远逃过自动撤退判定。
+`会社広告可否` 选项: `可` / `不可` / `物件による` (空 = staff 未填) — staff 顺手填这个列, sync_company_lists.py 会同步到 .txt/.csv,下次 pipeline 该公司就不再 確認待ち。
 
-**谁设 `取下待ち`**:
+**Status 协议**:
+- ad-script 看到 `要取り下げ` → 在 SUUMO 撤下广告 → 改 Status 为 `取下済み`
+- 別の script(ad-script 团队的) 投稿 SUUMO 失败 → 设 `入稿失敗`
+- staff 手动决定永禁该物件 → 设 `広告掲載禁止`
+- 写入时 ad_status==可 → Status=広告待ち; ad_status==確認待ち → Status=確認待ち(staff 还需填 会社広告可否)
+
+**watch_registrations 扫描范围**: 扫所有非终态 active row, 包括 staff 中间态(`掲載保留` / `要確認`)。**注**: staff 把 row 改成 `掲載保留` 不再代表"我手动暂停了别动"; 我们仍会监视, 一旦 登録店舗数 ≥ 10 或 公開日時 ≥ 3 天, 仍会自动设 `要取り下げ`。这样防止暂停态 row 永远逃过自动撤退判定。
+
+**谁设 `要取り下げ`**:
 1. `watch_registrations.py` 自动判定:登録店舗数 ≥ 10 OR 公開日時 距今 ≥ 3 天
 2. staff 手动(在 Notion UI 直接选)
 3. 未来更复杂的判定脚本(D3 反响零撤、score 重评等,A/B 文档里提的)
@@ -138,7 +150,7 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 - **macOS 首次写 crontab 触发 Full Disk Access 弹窗会被 dontAsk 模式吞掉** — 已改用 launchd plist 避开
 - **Pipeline 完成后 daemon 会被 sleep-detection 误触发跑空轮** — subprocess.run 阻塞 > 60 秒(SLEEP_DETECT_THRESHOLD), 主线程返回时被认为"系统刚醒",空跑 ~15 秒。**已知未修**, 影响很小
 - **「不可(仲介)」物件 Step 3 早退** — return "unallowed" 跳过 SUUMO 抓取(否则浪费 60 秒/件)。理由: 不可物件无论多高分都不进 TOP, 抓 SUUMO 只是装饰
-- **Notion DB 的 Status 选项 per-DB 不同** — `取下済` 只存在于 新着物件おすすめ。`watch_registrations.py` 用 `(label, id, skip_statuses)` 三元组解决
+- **Notion DB 的 Status 选项 per-DB 不同** — `取下済み` 只存在于 新着物件おすすめ。`watch_registrations.py` 用 `(label, id, skip_statuses)` 三元组解决
 - **Pickle/XGBoost 兼容性警告** — pickle 跨 xgboost 版本会出 UserWarning 但仍能 unpickle, 不影响运行。下次模型重训用 `model.save_model()` 更稳
 
 ## 最近改动时间线(mac开发版1.0 + 后续)
@@ -152,10 +164,11 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 - **2026-04-24** watch_registrations 扩展到 確認待ち物件 DB(per-DB skip_statuses 配置)
 - **2026-04-25** `RECOMMEND_THRESHOLD` 6.5 → 5.8(原阈值 TOP 表录入太少)
 - **2026-04-27** 確認待ち物件 DB 加 `会社広告可否` 列 + `sync_company_lists.py` + launchd `jp.ango.synccompanylists`(staff 顺手填判定 → 自动同步到名单)
-- **2026-04-27** TOP DB 移除 `MAX_RECOMMENDATIONS=20` 上限; 加 `取下待ち` / `取下済`(両 DB 统一终态) Status; `add_to_top_db` dedup 改单点查询; watch_registrations 改用 active_statuses allowlist; 新增 `archive_old_recommendations.py` + launchd `jp.ango.archiverecommendations` 周归档终态老 row。这套改动是为接下来的"广告投放生命周期"项目准备的基础设施(支持 D3 撤退 / 登録店舗数 阈值撤退 / A/B 反响归因)。
-- **2026-04-27** watch_registrations 加自动撤退判定: 登録店舗数 ≥ 10 OR 公開日時 ≥ 3 天 → 自动设 Status=取下待ち。注意 公開日時 是 pipeline 写入 TOP 表的日期,不严格等于 ad-script 投放日(通常差 1 天内,可接受)。
+- **2026-04-27** TOP DB 移除 `MAX_RECOMMENDATIONS=20` 上限; 加 `要取り下げ` / `取下済み`(両 DB 统一终态) Status; `add_to_top_db` dedup 改单点查询; watch_registrations 改用 active_statuses allowlist; 新增 `archive_old_recommendations.py` + launchd `jp.ango.archiverecommendations` 周归档终态老 row。这套改动是为接下来的"广告投放生命周期"项目准备的基础设施(支持 D3 撤退 / 登録店舗数 阈值撤退 / A/B 反响归因)。
+- **2026-04-27** watch_registrations 加自动撤退判定: 登録店舗数 ≥ 10 OR 公開日時 ≥ 3 天 → 自动设 Status=要取り下げ。注意 公開日時 是 pipeline 写入 TOP 表的日期,不严格等于 ad-script 投放日(通常差 1 天内,可接受)。
 - **2026-04-27** process_pipeline 写 TOP 前加高竞争预过滤: 用 SUUMO kwd 搜索, 已被 > 5 家中介公开 → 跳过 (return "high_competition")。复用 watch_registrations 的 kwd 搜索代码 (复制到 _kwd_* 前缀, 两边独立维护)。新写入 TOP 行的「登録店舗数」字段一进就有值。
 - **2026-04-27** Top 20 热门駅 +0.3 推薦点数加分 (findings T1-6): 物件最寄駅 ∈ HOT_STATIONS (世田谷代田/緑が丘/千石/若林/京成小岩 等 20 駅, 反响/千供給 50-368, 平均 10-60 倍) → calculate_recommendation 内部直接加 0.3。期望 +5 反响/月。不做减分。
 - **2026-04-28** watch_registrations active filter 扩大: おすすめ DB 从 [広告待ち, 掲載指示済み] → [広告待ち, 掲載指示済み, 掲載保留, 要確認]。原因: staff 把 row 改成 掲載保留(暂停)后, 我们就不再扫描, 即使 登録店舗数 后来涨到 ≥ 10 也不会触发自动撤(发现 10 件历史问题行)。现在 staff 暂停态也纳入自动判定。
+- **2026-04-28** **TOP DB 合并**: 確認待ち物件 整合到 おすすめ DB, 122 行迁移, ad_status==確認待ち 的物件用 Status=確認待ち 区分。Status options 从 6 个改成 8 个 (3 To-do / 2 In progress / 3 Complete), 改名 `取下待ち→要取り下げ` / `取下済→取下済み`, 新增 `入稿失敗` (别的 script 设) / `広告掲載禁止` (staff 手动)。会社広告可否 列从 確認待ち 迁到 おすすめ。架构由 2 张 TOP DB 简化为 1 张, 5 个生产文件改了 + 3 个遗留脚本加 DEPRECATED 头。
 
 完整 git 历史: `git log --oneline` 在分支 `mac开发版1.0`(GitHub remote: `kokoAngo/ADS`)

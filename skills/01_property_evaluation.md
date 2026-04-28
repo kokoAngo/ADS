@@ -2,7 +2,7 @@
 
 ## 用途
 
-REINS 上传到 Notion MAIN DB 的每一个物件,系统打出推薦点数,**够高 + 商号合规 + 不在 SUUMO 红海**就写到 TOP 表(新着物件おすすめ / 確認待ち物件)供 ad-script 投放。这是整个项目最核心的 pipeline。
+REINS 上传到 Notion MAIN DB 的每一个物件,系统打出推薦点数,**够高 + 商号合规 + 不在 SUUMO 红海**就写到 TOP 表(新着物件おすすめ, 2026-04-28 合并后唯一)供 ad-script 投放。这是整个项目最核心的 pipeline。
 
 ## 触发
 
@@ -18,7 +18,9 @@ REINS 上传到 Notion MAIN DB 的每一个物件,系统打出推薦点数,**够
 算: 每个物件按 8 步处理 (Step 1-8)
 
 写: Notion MAIN DB → 予測_view数 / 広告可否 / 予測_反響数 / 市場順位 / 広告数 / 推薦点数
-   Notion TOP DB (新着物件おすすめ 或 確認待ち物件) → 满足条件的高分物件
+   Notion 新着物件おすすめ DB → 满足条件的高分物件
+     - ad_status==可     → Status=広告待ち (商号已 whitelist, 直接进队)
+     - ad_status==確認待ち → Status=確認待ち (staff 还要填会社広告可否)
 ```
 
 ## 8 步流程
@@ -42,6 +44,10 @@ REINS 上传到 Notion MAIN DB 的每一个物件,系统打出推薦点数,**够
 3. SUUMO kwd 搜索的中介数 ≤ `MAX_COMPETITION_FOR_ENTRY` (5)
 
 第 3 步通过 `_kwd_count_listings` 即时查 SUUMO,确认不是红海。如果 > 5 → return `high_competition` (TOP 表不写)。
+
+写入 おすすめ DB 时初始 Status:
+- ad_status==`可`     → `広告待ち` (直接等 ad-script 投放)
+- ad_status==`確認待ち` → `確認待ち` (staff 看到后填 会社広告可否, 再改 Status=広告待ち)
 
 ## 关键代码
 
@@ -102,5 +108,5 @@ REINS 上传到 Notion MAIN DB 的每一个物件,系统打出推薦点数,**够
 
 - [#4 触发调度](04_trigger_scheduling.md): 触发 main(), pipeline 是它的 subprocess
 - [#5 管理会社判定](05_company_classification.md): Step 3 用的黑/白/case 名单由它维护
-- [#2 登録中介数](02_listing_count_watch.md) + [#3 取下待ち/取下済](03_retire_lifecycle.md): 写 TOP 后接管 row 的生命周期
+- [#2 登録中介数](02_listing_count_watch.md) + [#3 要取り下げ/取下済み](03_retire_lifecycle.md): 写 TOP 后接管 row 的生命周期
 - pipeline 完成不等于物件完成 — TOP DB 里的 row 还要走 ad-script 投放 / 撤退 / 归档 的全程

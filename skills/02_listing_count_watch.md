@@ -4,7 +4,7 @@
 
 TOP 表里每个物件,定期(每 2 小时)在 SUUMO 上搜一次,看**已经有几家中介公开了同房间**。这个数字写到「登録店舗数」字段。数字大 = 红海,我们投广告效果差;数字小 = 蓝海,继续投有意义。
 
-也作为自动撤退判定的输入([#3 取下待ち](03_retire_lifecycle.md)):中介数 ≥ 10 → 自动设 取下待ち。
+也作为自动撤退判定的输入([#3 要取り下げ](03_retire_lifecycle.md)):中介数 ≥ 10 → 自动设 要取り下げ。
 
 ## 触发
 
@@ -20,30 +20,28 @@ launchd: jp.ango.watchregistrations
 ## 数据流
 
 ```
-读: Notion TOP DB (おすすめ + 確認待ち) 中 active row
+读: Notion おすすめ DB (合并后唯一 TOP DB) 中 active row
    + Notion MAIN DB 按 REINS_ID 取 rent / area
    + SUUMO 实时网页 (kwd 搜索)
 
 算: kwd 搜建物名 → 过滤 cassette by rent±0.5万 / area±2㎡
 
-写: Notion TOP DB 该 row 的 「登録店舗数」字段 (number)
-   如果触发撤退条件 → 同时设 Status="取下待ち"
+写: Notion おすすめ DB 该 row 的 「登録店舗数」字段 (number)
+   如果触发撤退条件 → 同时设 Status="要取り下げ"
 ```
 
 ## active_statuses 设计
 
 ```python
 TARGET_DATABASES = [
-    ("新着物件おすすめ", ..., ["広告待ち", "掲載指示済み", "掲載保留", "要確認"]),
-    ("確認待ち物件",     ..., ["広告待ち", "広告済"]),
+    ("新着物件おすすめ", "3171...", ["確認待ち", "広告待ち", "掲載保留", "掲載指示済み"]),
 ]
 ```
 
-跳过:
-- 终态: `取下済` (生命周期完成) / `取下待ち` (即将撤,无意义再监视)
-- staff "暂存" 的中间态本来想跳过,但 2026-04-28 决策放弃 — staff 改成 `掲載保留` 后还是要扫,否则红海物件永远逃过自动撤退判定。
-
-おすすめ 的 active 包含 `掲載保留` / `要確認`,確認待ち 不含(因为 確認待ち 没有这些 staff 暂停态)。
+跳过(不扫):
+- **终态** (Complete group): `取下済み` / `入稿失敗` / `広告掲載禁止`
+- **要撤已发起**: `要取り下げ` (等 ad-script 处理, 监视无意义)
+- 注: staff `掲載保留` 暂停态在 active 里(2026-04-28 决策), staff 改成 `掲載保留` 后我们仍会监视 — 否则红海物件永远逃过自动撤退判定。
 
 ## SUUMO kwd 搜索关键技术点
 
@@ -58,11 +56,11 @@ TARGET_DATABASES = [
 ## 撤退条件 (在 process_one 内同时检查)
 
 ```python
-RETIRE_BY_LISTING_COUNT = 10   # 中介数 ≥ 此值 → 取下待ち
-RETIRE_BY_AGE_DAYS = 3         # 公開日時 距今 ≥ 此天数 → 取下待ち (无视有无反响)
+RETIRE_BY_LISTING_COUNT = 10   # 中介数 ≥ 此值 → 要取り下げ
+RETIRE_BY_AGE_DAYS = 3         # 公開日時 距今 ≥ 此天数 → 要取り下げ (无视有无反响)
 ```
 
-即:**watch_registrations 既更新 登録店舗数,也顺手判 取下待ち**。判定后 Status 改成 `取下待ち`,下次扫描就跳过(active filter 不含 取下待ち)。
+即:**watch_registrations 既更新 登録店舗数,也顺手判 要取り下げ**。判定后 Status 改成 `要取り下げ`,下次扫描就跳过(active filter 不含 要取り下げ)。
 
 ## 关键代码
 
@@ -82,8 +80,8 @@ RETIRE_BY_AGE_DAYS = 3         # 公開日時 距今 ≥ 此天数 → 取下待
 |---|---|---|
 | `RENT_TOL_MAN` | 0.5 | 万円, kwd 搜索后过滤 cassette 的 rent 容差 |
 | `AREA_TOL_M2` | 2.0 | m², 同上 area 容差 |
-| `RETIRE_BY_LISTING_COUNT` | 10 | 登録店舗数 ≥ 此值 → 自动设 取下待ち |
-| `RETIRE_BY_AGE_DAYS` | 3 | 公開日時 距今 ≥ 此值 → 自动设 取下待ち |
+| `RETIRE_BY_LISTING_COUNT` | 10 | 登録店舗数 ≥ 此值 → 自动设 要取り下げ |
+| `RETIRE_BY_AGE_DAYS` | 3 | 公開日時 距今 ≥ 此值 → 自动设 要取り下げ |
 
 ## 失败模式 / Gotcha
 
@@ -96,5 +94,5 @@ RETIRE_BY_AGE_DAYS = 3         # 公開日時 距今 ≥ 此天数 → 取下待
 ## 关联工作流
 
 - [#1 物件评价](01_property_evaluation.md): 那边的 kwd 搜索代码是这里的复制副本
-- [#3 取下待ち/取下済](03_retire_lifecycle.md): 这里设 取下待ち,那边的 ad-script 接管撤广告
+- [#3 要取り下げ/取下済み](03_retire_lifecycle.md): 这里设 要取り下げ,那边的 ad-script 接管撤广告
 - [#4 触发调度](04_trigger_scheduling.md): launchd 调度本服务

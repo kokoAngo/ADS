@@ -32,8 +32,8 @@ load_dotenv()
 # ============================================================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
-RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おすすめ
-PENDING_DATABASE_ID = "3181c1974dad80279cb7dfdeb92b946f"   # 確認待ち物件
+RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おすすめ (合并后唯一 TOP DB, 2026-04-28)
+# 注: 旧 PENDING_DATABASE_ID (3181...) 已废弃, 122 行迁到 おすすめ DB
 
 # 截止时间（JST）— 每天 11:00, 15:00, 19:00, 23:00 是新物件登载截止时间
 # 流水线只评估"最近一次截止时间之后"创建的物件
@@ -997,9 +997,10 @@ def reins_id_exists_in_top(db_id, reins_id):
     return len(hits) > 0
 
 
-def add_to_top_db(db_id, db_name, prop, listing_count=None):
+def add_to_top_db(db_id, db_name, prop, listing_count=None, status_name="広告待ち"):
     """物件实时添加到 TOP DB. 去重(REINS_ID 已存在则跳过), 不再有大小上限。
-    listing_count: 写入时同步设置「登録店舗数」字段(免得 watch_registrations 2h 后才填)"""
+    listing_count: 写入时同步设置「登録店舗数」字段(免得 watch_registrations 2h 后才填)
+    status_name: 初始 Status (可→広告待ち; 確認待ち→確認待ち, staff 还需走商号判定)"""
     with _notion_lock:
         if reins_id_exists_in_top(db_id, prop["reins_id"]):
             return False  # 已存在
@@ -1010,14 +1011,14 @@ def add_to_top_db(db_id, db_name, prop, listing_count=None):
             "物件名": {"rich_text": [{"text": {"content": prop.get("building_name", "")}}]} if prop.get("building_name") else {"rich_text": []},
             "管理会社": {"rich_text": [{"text": {"content": prop.get("management_company", "")}}]} if prop.get("management_company") else {"rich_text": []},
             "公開日時": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}},
-            "Status": {"status": {"name": "広告待ち"}}
+            "Status": {"status": {"name": status_name}}
         }
         if listing_count is not None:
             properties["登録店舗数"] = {"number": int(listing_count)}
 
         if notion_create(db_id, properties):
             extra = f" 登録店舗数={listing_count}" if listing_count is not None else ""
-            log(f"    → 写入 {db_name}: {prop['reins_id']} ({prop['score']}分){extra}")
+            log(f"    → 写入 {db_name}: {prop['reins_id']} ({prop['score']}分) Status={status_name}{extra}")
             return True
         return False
 
@@ -1100,14 +1101,15 @@ def process_property(prop_data, browser_page, browser_context):
         log(f"  推薦点数: {score}")
 
     # Step 8: 实时写入TOP表 (含高竞争预过滤)
+    # 合并后只有 1 张 TOP DB (おすすめ), 用 Status 区分商号已认可 vs 待确认
     if score >= RECOMMEND_THRESHOLD:
-        target = None
+        initial_status = None
         if ad_status == "可":
-            target = (RECOMMEND_DATABASE_ID, "新着物件おすすめ")
+            initial_status = "広告待ち"      # 商号已是 whitelist, 直接进广告队列
         elif ad_status == "確認待ち":
-            target = (PENDING_DATABASE_ID, "確認待ち物件")
+            initial_status = "確認待ち"      # 商号未确认, staff 看到后填 会社広告可否, 再改 Status
 
-        if target:
+        if initial_status:
             # 高竞争预过滤: 用 SUUMO kwd 搜索看已有几家中介公开了此房间
             listing_count = _kwd_count_listings(
                 browser_page,
@@ -1125,7 +1127,8 @@ def process_property(prop_data, browser_page, browser_context):
                 "building_name": prop_data.get("building_name", ""),
                 "management_company": company
             }
-            add_to_top_db(target[0], target[1], top_prop, listing_count=listing_count)
+            add_to_top_db(RECOMMEND_DATABASE_ID, "新着物件おすすめ", top_prop,
+                          listing_count=listing_count, status_name=initial_status)
 
     return "success"
 

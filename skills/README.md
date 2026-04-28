@@ -8,7 +8,7 @@
 |---|---|---|
 | 1 | [01_property_evaluation.md](01_property_evaluation.md) | **物件评价流程** — pipeline 怎么给一个物件算分 + 写 TOP 表 |
 | 2 | [02_listing_count_watch.md](02_listing_count_watch.md) | **查看登录中介数流程** — 每 2h 在 SUUMO 上数同房间被多少中介公开了 |
-| 3 | [03_retire_lifecycle.md](03_retire_lifecycle.md) | **取下待ち / 取下済 流程** — 自动撤退判定 + 归档生命周期 |
+| 3 | [03_retire_lifecycle.md](03_retire_lifecycle.md) | **要取り下げ / 取下済み 流程** — 自动撤退判定 + 归档生命周期 |
 | 4 | [04_trigger_scheduling.md](04_trigger_scheduling.md) | **触发与调度流程** — daemon 4 种触发 + JST cutoff + launchd |
 | 5 | [05_company_classification.md](05_company_classification.md) | **管理会社判定流程** — 黑/白/case 名单的维护 + staff 顺手判定 → 自动同步 |
 
@@ -26,7 +26,7 @@
     └─→ 写 TOP 表 → [#3 生命周期] 接管
 
 [#2 登録中介数]
-    └─→ 触发 [#3 取下待ち] 判定
+    └─→ 触发 [#3 要取り下げ] 判定
 
 [#5 名单] 反过来影响 [#1] 的评价路径
 ```

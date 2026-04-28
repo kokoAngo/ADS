@@ -1,13 +1,13 @@
-# 取下待ち / 取下済 流程
+# 要取り下げ / 取下済み 流程
 
 ## 用途
 
 TOP 表里的物件不能永久存在,也不能投放无限期。需要一个**生命周期机制**:决定何时撤掉广告 → ad-script 真正撤 → 终态保留 30 天后归档,以便 A/B 复盘。
 
-`取下待ち` = "等待撤下" — 我们的脚本/staff 决定要撤,但还没真撤(SUUMO 上广告还在)。
-`取下済` = "已撤下" — ad-script 撤完了,row 进入终态。两个 DB 统一用这个。
+`要取り下げ` = "等待撤下" — 我们的脚本/staff 决定要撤,但还没真撤(SUUMO 上广告还在)。
+`取下済み` = "已撤下" — ad-script 撤完了,row 进入终态。两个 DB 统一用这个。
 
-## 触发(谁能设 `取下待ち`)
+## 触发(谁能设 `要取り下げ`)
 
 ```
 1. 自动 (watch_registrations 内, 见 [#2])
@@ -15,20 +15,20 @@ TOP 表里的物件不能永久存在,也不能投放无限期。需要一个**�
    └── 公開日時 距今 ≥ 3 天 (RETIRE_BY_AGE_DAYS, 投放够久)
 
 2. 手动
-   └── staff 在 Notion UI 直接选 取下待ち
+   └── staff 在 Notion UI 直接选 要取り下げ
 ```
 
 ## ad-script 协议(关键字符串契约)
 
 ```
-ad-script 看到 row.Status == "取下待ち" 时:
+ad-script 看到 row.Status == "要取り下げ" 时:
   → 在 SUUMO 撤掉对应物件的广告
-  → 把 Status 改为 "取下済" (両 DB 一致)
+  → 把 Status 改为 "取下済み" (両 DB 一致)
 ```
 
 > 这是跟 ad-script owner 之间的字符串契约。
 > 改名要双方同步。
-> ad-script owner 还在升级中, 升级前 staff 可手动改回 広告待ち 或保留 取下待ち。
+> ad-script owner 还在升级中, 升级前 staff 可手动改回 広告待ち 或保留 要取り下げ。
 
 ## 数据流
 
@@ -36,31 +36,28 @@ ad-script 看到 row.Status == "取下待ち" 时:
 [判定阶段]
   watch_registrations.process_one()
     OR staff 手动
-    → notion_update(page_id, Status="取下待ち")
+    → notion_update(page_id, Status="要取り下げ")
 
 [执行阶段] (ad-script 跑,我们没源码)
-  ad-script 周期扫 取下待ち row
+  ad-script 周期扫 要取り下げ row
     → 在 SUUMO 撤广告
-    → notion_update(page_id, Status="取下済")
+    → notion_update(page_id, Status="取下済み")
 
 [归档阶段] (周日 02:00 JST)
   archive_old_recommendations.py
-    → 拉两 DB 中 Status="取下済" 且 Created time > 30 天 的 row
+    → 拉两 DB 中 Status="取下済み" 且 Created time > 30 天 的 row
     → notion_archive(page_id) 软归档 (archived=true)
 ```
 
-## 両 DB Status 选项对照
+## おすすめ DB Status 8 个选项 (3-2-3 group, 2026-04-28 合并后)
 
-| 新着物件おすすめ | 確認待ち物件 |
+| Group | Options |
 |---|---|
-| 広告待ち | 広告待ち |
-| 掲載保留 | — |
-| 掲載指示済み | 広告済 |
-| **取下待ち** | **取下待ち** |
-| **取下済** | **取下済** |
-| 要確認 | — |
+| **To-do** | `確認待ち` (商号未確) / `広告待ち` (待广告投放) / `掲載保留` (staff 暂停) |
+| **In progress** | `掲載指示済み` (广告投放中) / `要取り下げ` (要撤,等 ad-script) |
+| **Complete** | `取下済み` (撤完) / `入稿失敗` (投稿到 SUUMO 失败) / `広告掲載禁止` (staff 手动永禁) |
 
-おすすめ 多 3 个 staff 中间态 (`掲載保留` / `要確認`),反映 staff 在该 DB 上的细致控制流。`取下待ち` / `取下済` 在两 DB 都有,语义一致。
+Group 仅是 Notion UI 视觉分组,代码不依赖 group, 直接查 Status 字符串值。
 
 ## archive 软归档 (vs 真删)
 
@@ -74,7 +71,7 @@ ad-script 看到 row.Status == "取下待ち" 时:
 | 入口 / 函数 | 位置 |
 |---|---|
 | 自动判定 (watch_registrations 内) | `scripts/watch_registrations.py:289-326` |
-| `notion_update(Status=取下待ち)` 调用点 | `scripts/watch_registrations.py:297, 318` |
+| `notion_update(Status=要取り下げ)` 调用点 | `scripts/watch_registrations.py:297, 318` |
 | 归档主逻辑 `archive_db()` | `scripts/archive_old_recommendations.py:110` |
 | `notion_archive(page_id)` 软归档调用 | `scripts/archive_old_recommendations.py:96` |
 | launchd plist | `scripts/launchd/jp.ango.archiverecommendations.plist` |
@@ -91,10 +88,10 @@ ad-script 看到 row.Status == "取下待ち" 时:
 
 - **公開日時 是 pipeline 写入 TOP 时设的当天日期**, 不严格等于 ad-script 实际投放日(可能差 1 天)。3 天阈值比 ad-script 的 "投放后 3 天" 略宽松。
 - **公開日時 字段可能为空** (老 row 或编辑过): watch 用 `created_time` 当 fallback。
-- **`取下待ち` 之前用 `広告済` 当 終态会循环**: 早期设计 ad-script 撤后改 `広告済`,但 active list 含 `広告済` → 又被扫 → 又设 取下待ち → 循环。修正:統一用 `取下済` 当终态(2026-04-27)。
+- **`要取り下げ` 之前用 `広告済` 当 終态会循环**: 早期设计 ad-script 撤后改 `広告済`,但 active list 含 `広告済` → 又被扫 → 又设 要取り下げ → 循环。修正:統一用 `取下済み` 当终态(2026-04-27)。
 - **archive 用 archived=true (软删)**, 不是 DELETE 物理删除。Notion 30 天回收站后才真删。
 - **dry-run 默认 ON 在脚本里 (`DRY_RUN=1`)**, 但 launchd plist 设了 `DRY_RUN=0` 真做。手动跑测试时显式 `DRY_RUN=1 ./venv/bin/python scripts/archive_old_recommendations.py`。
-- **`取下待ち` 卡住的 row**: ad-script 没升级前, row 会停在该状态 — SUUMO 上广告还在。staff 可以手动改回 広告待ち 或保持。
+- **`要取り下げ` 卡住的 row**: ad-script 没升级前, row 会停在该状态 — SUUMO 上广告还在。staff 可以手动改回 広告待ち 或保持。
 
 ## 关联工作流
 
@@ -108,7 +105,7 @@ ad-script 看到 row.Status == "取下待ち" 时:
 Day 0   pipeline 写 row 到 TOP, Status=広告待ち, 公開日時=2026-04-28
 Day 0+  ad-script 看到 → 在 SUUMO 投广告, Status=掲載指示済み
 Day 1-3 watch_registrations 每 2h 扫一次, 更新 登録店舗数
-Day 2   登録店舗数 涨到 10 → watch 自动设 Status=取下待ち
-Day 2+  ad-script 扫到 取下待ち → 撤 SUUMO 广告 → 改 Status=取下済
+Day 2   登録店舗数 涨到 10 → watch 自动设 Status=要取り下げ
+Day 2+  ad-script 扫到 要取り下げ → 撤 SUUMO 广告 → 改 Status=取下済み
 Day 32  archive_old_recommendations 周日跑 → 软归档该 row
 ```

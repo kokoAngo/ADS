@@ -3,8 +3,8 @@
 """
 Watch Registrations - 独立服务
 
-定期扫描推荐 DB (新着物件おすすめ / 確認待ち物件):
-1. 跳过 Status=取下済 的物件
+定期扫描推荐 DB (新着物件おすすめ, 2026-04-28 合并后只剩这一张):
+1. 跳过终态(取下済み / 入稿失敗 / 広告掲載禁止) + 已要撤(要取り下げ)
 2. 按 REINS_ID 从 MAIN DB 取得 rent/area (用于过滤 SUUMO 搜索结果)
 3. 用物件名在 SUUMO 上做キーワード搜索, 按 rent±0.5万 & area±2m2 过滤
 4. 过滤后剩下的 cassette 数 = 登録店舗数(一般一家中介一次登録该房间)
@@ -46,13 +46,11 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 MAIN_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"       # 全物件 DB
 # 需要扫描的推荐 DB(都有 REINS_ID / 物件名 / Status / 登録店舗数 字段)
 # 每项: (显示名, DB ID, 活跃 Status allowlist)
-# 只跳过终态(取下済 / 取下待ち), 其他 staff 中间态(掲載保留/要確認 等)也纳入扫描,
-# 否则 staff 暂停的 row 一旦红海/超期, 永远逃过自动 取下待ち 判定
+# 2026-04-28 合并后只剩 1 张 TOP DB; 旧 確認待ち DB 已废弃
+# active = 全部非终态 + 非已要撤; 终态(取下済み/入稿失敗/広告掲載禁止/要取り下げ)不扫
 TARGET_DATABASES = [
     ("新着物件おすすめ", "3171c1974dad80439367df13aa67f012",
-        ["広告待ち", "掲載指示済み", "掲載保留", "要確認"]),
-    ("確認待ち物件",      "3181c1974dad80279cb7dfdeb92b946f",
-        ["広告待ち", "広告済"]),
+        ["確認待ち", "広告待ち", "掲載保留", "掲載指示済み"]),
 ]
 
 SUUMO_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=040&ta=13"
@@ -61,9 +59,9 @@ SUUMO_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=04
 RENT_TOL_MAN = 0.5     # 万円
 AREA_TOL_M2 = 2.0      # m2
 
-# 自动撤退判定 (设 Status=取下待ち, ad-script 看到后会撤掉广告)
-RETIRE_BY_LISTING_COUNT = 10   # 登録店舗数 ≥ 此值 → 取下待ち (竞争太多, 浪费枠)
-RETIRE_BY_AGE_DAYS = 3         # 公開日時 + 此天数 < 今日 → 取下待ち (无论有无反响, 投放够久就撤)
+# 自动撤退判定 (设 Status=要取り下げ, ad-script 看到后会撤掉广告)
+RETIRE_BY_LISTING_COUNT = 10   # 登録店舗数 ≥ 此值 → 要取り下げ (竞争太多, 浪费枠)
+RETIRE_BY_AGE_DAYS = 3         # 公開日時 + 此天数 < 今日 → 要取り下げ (无论有无反响, 投放够久就撤)
 
 LOG_FILE = Path("logs") / "watch_registrations.log"
 LOG_FILE.parent.mkdir(exist_ok=True)
@@ -295,8 +293,8 @@ def process_one(item, browser_page):
     # 撤退判定 1: 投放年龄 ≥ RETIRE_BY_AGE_DAYS 天 → 直接撤, 不必再查 SUUMO
     age_days = _days_since(koukai_date)
     if age_days is not None and age_days >= RETIRE_BY_AGE_DAYS:
-        log(f"  ⚠ 公開日時={koukai_date} (距今 {age_days} 天 ≥ {RETIRE_BY_AGE_DAYS}) → 取下待ち")
-        notion_update(page_id, {"Status": {"status": {"name": "取下待ち"}}})
+        log(f"  ⚠ 公開日時={koukai_date} (距今 {age_days} 天 ≥ {RETIRE_BY_AGE_DAYS}) → 要取り下げ")
+        notion_update(page_id, {"Status": {"status": {"name": "要取り下げ"}}})
         return "retire_by_age"
 
     # 拉物件详情用于 SUUMO 搜索
@@ -313,10 +311,10 @@ def process_one(item, browser_page):
     value = int(count) if count and count > 0 else 0
     update_props = {"登録店舗数": {"number": value}}
 
-    # 撤退判定 2: 登録店舗数 ≥ RETIRE_BY_LISTING_COUNT → 取下待ち
+    # 撤退判定 2: 登録店舗数 ≥ RETIRE_BY_LISTING_COUNT → 要取り下げ
     if value >= RETIRE_BY_LISTING_COUNT:
-        update_props["Status"] = {"status": {"name": "取下待ち"}}
-        log(f"  ⚠ 登録店舗数={value} ≥ {RETIRE_BY_LISTING_COUNT} → 同时设 Status=取下待ち")
+        update_props["Status"] = {"status": {"name": "要取り下げ"}}
+        log(f"  ⚠ 登録店舗数={value} ≥ {RETIRE_BY_LISTING_COUNT} → 同时设 Status=要取り下げ")
 
     ok = notion_update(page_id, update_props)
     if not ok:

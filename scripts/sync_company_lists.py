@@ -3,13 +3,13 @@
 """
 Sync Company Lists - 独立服务
 
-读取「確認待ち物件」DB 中 staff 填好的「会社広告可否」列,
+读取「新着物件おすすめ」DB 中 staff 填好的「会社広告可否」列,
 把判定写回到 data/blacklist_companies.txt / whitelist_companies.txt /
 data/management_companies.csv (case_by_case),
 让 process_pipeline 下次运行直接用上,该公司不再回到 確認待ち。
 
 工作流(staff 视角):
-  staff 在 確認待ち物件 DB 处理物件时,顺手在「会社広告可否」列填:
+  staff 在 新着物件おすすめ DB 处理物件时,顺手在「会社広告可否」列填:
     可 / 不可 / 物件による
   (留空表示暂不判定,本脚本忽略)
 
@@ -45,7 +45,7 @@ sys.stdout.reconfigure(line_buffering=True)
 # 配置
 # ============================================================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-PENDING_DATABASE_ID = "3181c1974dad80279cb7dfdeb92b946f"  # 確認待ち物件
+RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おすすめ (2026-04-28 合并后唯一 TOP DB)
 
 DATA_DIR = Path("data")
 BLACKLIST_FILE = DATA_DIR / "blacklist_companies.txt"
@@ -202,8 +202,8 @@ def remove_case_from_csv(names_to_remove):
 # 主逻辑
 # ============================================================
 def collect_judgments():
-    """从 確認待ち物件 DB 收集已填的 会社広告可否, 按公司聚合(冲突取最近 last_edited_time)"""
-    pages = notion_query(PENDING_DATABASE_ID, filter_obj={
+    """从 新着物件おすすめ DB 收集已填的 会社広告可否, 按公司聚合(冲突取最近 last_edited_time)"""
+    pages = notion_query(RECOMMEND_DATABASE_ID, filter_obj={
         "property": "会社広告可否",
         "select": {"is_not_empty": True}
     })
@@ -238,7 +238,7 @@ def main():
     log(f"现有: blacklist={len(blacklist)} whitelist={len(whitelist)} case_by_case={len(case_by_case)}")
 
     # 2. 拉 Notion 判定
-    log("拉取 確認待ち物件 DB 的 会社広告可否 ...")
+    log("拉取 新着物件おすすめ DB 的 会社広告可否 ...")
     judgments = collect_judgments()
     log(f"staff 已填 判定: {len(judgments)} 个公司")
 
