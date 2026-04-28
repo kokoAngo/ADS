@@ -88,6 +88,8 @@ launchd: jp.ango.archiverecommendations
 
 **`取下待ち` Status 协议**: ad-script 看到此 status → 在 SUUMO 撤下广告 → 改 Status 为终态 `取下済`(两个 DB 都用 取下済)。
 
+**watch_registrations 扫描范围**: 扫所有非终态 active row, 包括 staff 中间态(`掲載保留` / `要確認`)。**注**: staff 把 row 改成 `掲載保留` 不再代表"我手动暂停了别动"; 我们仍会监视, 一旦 登録店舗数 ≥ 10 或 公開日時 ≥ 3 天, 仍会自动设 `取下待ち`。这样防止暂停态 row 永远逃过自动撤退判定。
+
 **谁设 `取下待ち`**:
 1. `watch_registrations.py` 自动判定:登録店舗数 ≥ 10 OR 公開日時 距今 ≥ 3 天
 2. staff 手动(在 Notion UI 直接选)
@@ -152,5 +154,6 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 - **2026-04-27** watch_registrations 加自动撤退判定: 登録店舗数 ≥ 10 OR 公開日時 ≥ 3 天 → 自动设 Status=取下待ち。注意 公開日時 是 pipeline 写入 TOP 表的日期,不严格等于 ad-script 投放日(通常差 1 天内,可接受)。
 - **2026-04-27** process_pipeline 写 TOP 前加高竞争预过滤: 用 SUUMO kwd 搜索, 已被 > 5 家中介公开 → 跳过 (return "high_competition")。复用 watch_registrations 的 kwd 搜索代码 (复制到 _kwd_* 前缀, 两边独立维护)。新写入 TOP 行的「登録店舗数」字段一进就有值。
 - **2026-04-27** Top 20 热门駅 +0.3 推薦点数加分 (findings T1-6): 物件最寄駅 ∈ HOT_STATIONS (世田谷代田/緑が丘/千石/若林/京成小岩 等 20 駅, 反响/千供給 50-368, 平均 10-60 倍) → calculate_recommendation 内部直接加 0.3。期望 +5 反响/月。不做减分。
+- **2026-04-28** watch_registrations active filter 扩大: おすすめ DB 从 [広告待ち, 掲載指示済み] → [広告待ち, 掲載指示済み, 掲載保留, 要確認]。原因: staff 把 row 改成 掲載保留(暂停)后, 我们就不再扫描, 即使 登録店舗数 后来涨到 ≥ 10 也不会触发自动撤(发现 10 件历史问题行)。现在 staff 暂停态也纳入自动判定。
 
 完整 git 历史: `git log --oneline` 在分支 `mac开发版1.0`(GitHub remote: `kokoAngo/ADS`)
