@@ -109,6 +109,53 @@ launchd: jp.ango.archiverecommendations
 2. staff 手动(在 Notion UI 直接选)
 3. 未来更复杂的判定脚本(D3 反响零撤、score 重评等,A/B 文档里提的)
 
+## Bridge 通信 (analysis-claude ↔ ops-claude)
+
+別 Claude セッション「analysis-claude」が分析担当、本リポは ops-claude (パイプライン運用)。Notion DB「Claude Bridge」 (id: `3501c1974dad806f9a6dd028a6f078b1`、`.env` の `BRIDGE_DB_ID`) で双方向通信。**本体 `NOTION_API_KEY` とは別 integration** (`BRIDGE_NOTION_API_KEY`、`scripts/bridge.py` 専用)。
+
+### 列構造
+
+`title` / `body` / `topic` / `sender` (analysis-claude / ops-claude) / `msg_type` (finding / workflow / question / response / ack) / `thread_id` / `read_by_recipient` / `attachment`
+
+### CLI: `scripts/bridge.py`
+
+```bash
+# 未読確認 (新セッション開始時に必ず打つ)
+./venv/bin/python scripts/bridge.py inbox
+
+# 全文表示 + 既読化 (100KB 超は findings/bridge/ にダンプ)
+./venv/bin/python scripts/bridge.py read <page-id>
+
+# スレッド時系列表示
+./venv/bin/python scripts/bridge.py thread <thread-id>
+
+# 新規発信 (body は stdin)
+echo "本文" | ./venv/bin/python scripts/bridge.py send workflow <topic> "<title>"
+
+# 既存スレへ返信
+echo "本文" | ./venv/bin/python scripts/bridge.py reply <parent-page-id> response
+
+# 軽い ack (冪等、同 thread に既存 ack あれば no-op)
+./venv/bin/python scripts/bridge.py ack <page-id> "実装方針が固まりました"
+```
+
+### 運用ルール
+
+- **新セッション開始時に必ず `inbox` を打つ** — daemon ログにも未読件数は出るが、本文は CLI でしか取れない
+- **finding を読んで実装方針が固まったら `ack`** — analysis-claude に「届いた・着手予定」が見える
+- **大きな実装/設計変更が pipeline に入った後は `send workflow`** — analysis-claude の前提を最新化
+- **疑問があれば `reply ... question`** — 一方向 finding → 双方向 進化ループへ
+- **思想的に対立する場合も `reply ... response` で意見を返す** — ops 視点の運用上の制約 (cutoff 時刻 / staff の手作業) は analysis-claude には見えない
+
+### 既知の規約 (合意中)
+
+- **thread_id**: 新規発信時に自身の `page_id` を `thread_id` に書き戻し (`bridge.py send` が自動)。`reply` は親の `thread_id` を継承 (空なら親 `page_id` を使う)。analysis-claude 側にも `meta-protocol` topic で通知済み (応答待ち)
+- **sender 名と msg_type 名は英語固定** (DB 既存 select オプション、ユーザー作成時から英語)
+
+### workflow_trigger.py との連携
+
+daemon 起動時と各 trigger 後に `bridge.py inbox --count-only` を呼んで未読件数を logger.info で出す。本文は取りに行かないので軽量 (1 API call)。
+
 ## 运维命令
 
 ```bash

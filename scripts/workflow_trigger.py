@@ -73,6 +73,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def check_bridge_inbox():
+    """Bridge inbox の未読件数だけ logger に出す (本文は取らない、軽量)。失敗しても落ちない。"""
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "bridge.py"), "inbox", "--count-only"],
+            cwd=str(PROJECT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        msg = (result.stderr or result.stdout).strip()
+        if msg:
+            logger.info(f"[Bridge] {msg}")
+    except Exception as e:
+        logger.debug(f"Bridge inbox チェック失敗 (無視): {e}")
+
+
 def check_notion_for_new_properties():
     """检查Notion是否有当前 session 内新物件需要评估（予測_view数为空 且 创建时间 > 当前截止时间）"""
     try:
@@ -149,6 +166,7 @@ class WorkflowTriggerHandler(FileSystemEventHandler):
             logger.info("检测到触发信号，开始执行Workflow")
             logger.info("=" * 60)
 
+            check_bridge_inbox()
             self._run_workflow()
 
         except Exception as e:
@@ -226,6 +244,9 @@ def main():
     logger.info("Workflow Trigger 启动")
     logger.info(f"监控文件: {TRIGGER_FILE}")
     logger.info("=" * 60)
+
+    # Bridge inbox の未読件数を 1 回出す (起動時のみ)
+    check_bridge_inbox()
 
     # 创建触发文件（如果不存在）
     if not TRIGGER_FILE.exists():
