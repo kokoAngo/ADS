@@ -66,6 +66,22 @@ HOT_STATIONS = {
 }
 HOT_STATION_BONUS = 0.3   # 物件最寄駅 ∈ HOT_STATIONS → 推薦点数 +0.3
 
+# 区别反响効率 bonus (analysis-claude 提案 2026-04-30, 保守版 ±0.3 圧縮)
+# 元提案: 文京 +1.0, 杉並/板橋 +0.5, 中野/新宿 +0.3, 大田 -0.3, 葛飾/江東 -0.5
+# サンプル極小 (多くの区で n<10) のため過剰反応を避けて ±0.3 に圧縮
+# HOT_STATIONS と二重カウント回避: HOT_STATIONS 適用時は ward bonus skip
+# 3 ヶ月毎に再キャリブ予定 (analysis-claude が shrinkage 入りで再生成依頼中)
+WARD_REVERB_BONUS = {
+    '文京区': +0.3,  # 反響獲得率 85.7% (n=7, CI 広い)
+    '杉並区': +0.3,
+    '板橋区': +0.3,
+    '中野区': +0.3,
+    '新宿区': +0.3,
+    '大田区': -0.3,  # 5.0%
+    '葛飾区': -0.3,  # 0% (n<10)
+    '江東区': -0.3,  # 0% (n<10)
+}
+
 DATA_DIR = Path("data")
 BLACKLIST_FILE = DATA_DIR / "blacklist_companies.txt"
 WHITELIST_FILE = DATA_DIR / "whitelist_companies.txt"
@@ -966,7 +982,7 @@ def _kwd_count_listings(page, building_name, target_rent_man, target_area_sqm):
 # ============================================================
 # Step 6: 推薦点数计算
 # ============================================================
-def calculate_recommendation(view, inquiry, ad_count, station=None):
+def calculate_recommendation(view, inquiry, ad_count, station=None, ward=None):
     norm_view = min(view / 10, 1.0) * 10
     norm_inquiry = min(inquiry / 5, 1.0) * 10
     competition = max(0, 10 - (ad_count - 1) * 0.5) if ad_count else 5.0
@@ -977,11 +993,16 @@ def calculate_recommendation(view, inquiry, ad_count, station=None):
         competition * WEIGHTS['competition'] +
         market * WEIGHTS['market_rank']
     )
-    # 热门駅加分 (findings T1-6)
+    # 热门駅 / 区 加分 (HOT_STATIONS 优先, 二重カウント回避)
+    is_hot_station = False
     if station:
         normalized = station.rstrip("駅").strip()
         if normalized in HOT_STATIONS:
             total += HOT_STATION_BONUS
+            is_hot_station = True
+    # HOT_STATIONS 非適用時のみ区 bonus 適用
+    if not is_hot_station and ward and ward in WARD_REVERB_BONUS:
+        total += WARD_REVERB_BONUS[ward]
     return round(total, 2)
 
 
@@ -1090,13 +1111,18 @@ def process_property(prop_data, browser_page, browser_context):
     except Exception as e:
         log(f"  広告数 异常: {str(e)[:80]}")
 
-    # Step 7: 推薦点数 (含热门駅加分)
+    # Step 7: 推薦点数 (含热门駅 / 区 反响効率 加分)
     station = prop_data.get("station", "")
+    ward = prop_data.get("city", "")
     is_hot = bool(station and station.rstrip("駅").strip() in HOT_STATIONS)
-    score = calculate_recommendation(view, inquiry, ad_count, station=station)
+    ward_bonus = WARD_REVERB_BONUS.get(ward, 0.0) if not is_hot else 0.0
+    score = calculate_recommendation(view, inquiry, ad_count, station=station, ward=ward)
     notion_update(page_id, {"推薦点数": {"number": score}})
     if is_hot:
         log(f"  ⭐ HOT 駅 ({station}) → score +{HOT_STATION_BONUS} → {score}")
+    elif ward_bonus != 0.0:
+        sign = "+" if ward_bonus > 0 else ""
+        log(f"  📍 区 bonus ({ward}) → score {sign}{ward_bonus} → {score}")
     else:
         log(f"  推薦点数: {score}")
 
