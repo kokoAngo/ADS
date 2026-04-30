@@ -70,8 +70,8 @@ launchd: jp.ango.archiverecommendations
 | `POLL_INTERVAL` | 10*60 | `workflow_trigger.py:58` | Notion 轮询间隔(秒) |
 | `RENT_TOL_MAN` | 0.5 | `watch_registrations.py:54` | 同房间过滤容差(万円) |
 | `AREA_TOL_M2` | 2.0 | 同上 | 同房间过滤容差(m²) |
-| `RETIRE_BY_LISTING_COUNT` | 10 | `watch_registrations.py:58` | 登録店舗数 ≥ 此值自动设 Status=要取り下げ |
-| `RETIRE_BY_AGE_DAYS` | 3 | `watch_registrations.py:59` | 公開日時 距今 ≥ 此天数自动设 Status=要取り下げ(无论反响) |
+| `RETIRE_BY_LISTING_COUNT` | 10 (**暫時停用**) | `watch_registrations.py:64` | 2026-04-30 から判定停止 (staff 「登録中介数の影響は大きくない」)。値は復活時のため残し、登録店舗数の書き込み自体は維持 |
+| `RETIRE_BY_AGE_DAYS` | 4 | `watch_registrations.py:65` | 公開日時 距今 ≥ 此天数自动设 Status=要取り下げ(无论反响)。2026-04-30 に 3 → 4 に延長 |
 | `ARCHIVE_AFTER_DAYS` | 30 | `archive_old_recommendations.py:39` | TOP 表终态 row 多久后软归档 |
 
 **注**: TOP DB **不再有大小上限**(原 `MAX_RECOMMENDATIONS=20` 于 2026-04-27 移除)。改由 `archive_old_recommendations.py` 周期归档终态老 row, 让 ad-script 能完整跟踪生命周期不被新进物件顶掉。
@@ -217,5 +217,8 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 - **2026-04-27** Top 20 热门駅 +0.3 推薦点数加分 (findings T1-6): 物件最寄駅 ∈ HOT_STATIONS (世田谷代田/緑が丘/千石/若林/京成小岩 等 20 駅, 反响/千供給 50-368, 平均 10-60 倍) → calculate_recommendation 内部直接加 0.3。期望 +5 反响/月。不做减分。
 - **2026-04-28** watch_registrations active filter 扩大: おすすめ DB 从 [広告待ち, 掲載指示済み] → [広告待ち, 掲載指示済み, 掲載保留, 要確認]。原因: staff 把 row 改成 掲載保留(暂停)后, 我们就不再扫描, 即使 登録店舗数 后来涨到 ≥ 10 也不会触发自动撤(发现 10 件历史问题行)。现在 staff 暂停态也纳入自动判定。
 - **2026-04-28** **TOP DB 合并**: 確認待ち物件 整合到 おすすめ DB, 122 行迁移, ad_status==確認待ち 的物件用 Status=確認待ち 区分。Status options 从 6 个改成 8 个 (3 To-do / 2 In progress / 3 Complete), 改名 `取下待ち→要取り下げ` / `取下済→取下済み`, 新增 `入稿失敗` (别的 script 设) / `広告掲載禁止` (staff 手动)。会社広告可否 列从 確認待ち 迁到 おすすめ。架构由 2 张 TOP DB 简化为 1 张, 5 个生产文件改了 + 3 个遗留脚本加 DEPRECATED 头。
+- **2026-04-28** Bridge 通信基盤導入: `scripts/bridge.py` CLI で別 Claude セッション (analysis-claude) と Notion DB「Claude Bridge」(id `3501c197-4dad-806f-9a6d-d028a6f078b1`) 経由双方向通信。本体 `NOTION_API_KEY` と分離した `BRIDGE_NOTION_API_KEY`。workflow_trigger.py 起動時に未読件数を log に出す。詳細は CLAUDE.md「Bridge 通信」セクション。
+- **2026-04-30** WARD_REVERB_BONUS 追加 (analysis-claude #ward-reverb-efficiency 提案 → shrinkage 精算版採用): 11 区に ±0.43〜-0.13 の bonus (文京 +0.43 / 板橋 +0.16 / 中野 +0.13 / 新宿 +0.12 / 杉並 +0.12 / 世田谷 -0.07 / 大田 -0.13 等)。HOT_STATIONS と二重カウント回避 (HOT 適用時 ward bonus skip)。狙いは 世田谷一極集中の是正 (期待 +10 反响/月)、3 ヶ月毎に再キャリブ予定。
+- **2026-04-30** 自動撤退判定の見直し: staff 判断「登録中介数の影響は大きくない」→ `RETIRE_BY_LISTING_COUNT=10` 判定を **暫時停用** (登録店舗数の書き込み自体は観測用に維持)。`RETIRE_BY_AGE_DAYS=3 → 4` に延長 (3 日撤退で 04-30 に 41 件一括撤退発生したため緩和)。watch_registrations の撤退ロジックは「公開日時 + 4 日 < 今日」のみ。
 
 完整 git 历史: `git log --oneline` 在分支 `mac开发版1.0`(GitHub remote: `kokoAngo/ADS`)

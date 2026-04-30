@@ -60,8 +60,11 @@ RENT_TOL_MAN = 0.5     # 万円
 AREA_TOL_M2 = 2.0      # m2
 
 # 自动撤退判定 (设 Status=要取り下げ, ad-script 看到后会撤掉广告)
-RETIRE_BY_LISTING_COUNT = 10   # 登録店舗数 ≥ 此值 → 要取り下げ (竞争太多, 浪费枠)
-RETIRE_BY_AGE_DAYS = 3         # 公開日時 + 此天数 < 今日 → 要取り下げ (无论有无反响, 投放够久就撤)
+# 2026-04-30 更新: staff 判断「登録中介数の影響は大きくない」→ RETIRE_BY_LISTING_COUNT 暫時停用,
+# 公開日時 ≥ N 日のみで撤退。RETIRE_BY_AGE_DAYS を 3 → 4 に延長 (3 日撤退で起きていた 04-30 の 41 件
+# 一括撤退から少し緩和)。値は復活時のために残すが、判定ブロックはコメントアウト。
+RETIRE_BY_LISTING_COUNT = 10   # ⚠ 暫時停用 (2026-04-30) — 登録店舗数では撤退しない
+RETIRE_BY_AGE_DAYS = 4         # 公開日時 + 此天数 < 今日 → 要取り下げ (无论有无反响, 投放够久就撤)
 
 LOG_FILE = Path("logs") / "watch_registrations.log"
 LOG_FILE.parent.mkdir(exist_ok=True)
@@ -312,15 +315,15 @@ def process_one(item, browser_page):
     update_props = {"登録店舗数": {"number": value}}
 
     # 撤退判定 2: 登録店舗数 ≥ RETIRE_BY_LISTING_COUNT → 要取り下げ
-    if value >= RETIRE_BY_LISTING_COUNT:
-        update_props["Status"] = {"status": {"name": "要取り下げ"}}
-        log(f"  ⚠ 登録店舗数={value} ≥ {RETIRE_BY_LISTING_COUNT} → 同时设 Status=要取り下げ")
+    # 2026-04-30 暫時停用: staff 判断「登録中介数の影響は大きくない」。
+    # 登録店舗数の書き込み自体は維持 (観測用)、Status 自動変更だけ停止。
+    # if value >= RETIRE_BY_LISTING_COUNT:
+    #     update_props["Status"] = {"status": {"name": "要取り下げ"}}
+    #     log(f"  ⚠ 登録店舗数={value} ≥ {RETIRE_BY_LISTING_COUNT} → 同时设 Status=要取り下げ")
 
     ok = notion_update(page_id, update_props)
     if not ok:
         return "update_failed"
-    if value >= RETIRE_BY_LISTING_COUNT:
-        return "retire_by_count"
     if value > 0:
         log(f"  → 登録店舗数: {value}")
         return "success"
