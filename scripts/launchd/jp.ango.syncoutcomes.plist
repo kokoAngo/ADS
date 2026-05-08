@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>jp.ango.syncoutcomes</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/developer_recika/Fango/ADS/venv/bin/python</string>
+        <string>/Users/developer_recika/Fango/ADS/scripts/sync_outcomes.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DRY_RUN</key>
+        <string>0</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/developer_recika/Fango/ADS</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/developer_recika/Fango/ADS/logs/sync_outcomes.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/developer_recika/Fango/ADS/logs/sync_outcomes.launchd.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- 每天 03:00 JST. 03:00 跑是因为 cutoff 23:00 後の最後の投放分が
+         outcome DB rollup に反映され切る時刻 (JST) を見込んでいる. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>3</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+</dict>
+</plist>

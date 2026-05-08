@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Watch Registrations - 独立服务
+Watch Registrations - 独立服务 (観測専任、2026-05-07〜)
 
 定期扫描推荐 DB (新着物件おすすめ, 2026-04-28 合并后只剩这一张):
 1. 跳过终态(取下済み / 入稿失敗 / 広告掲載禁止) + 已要撤(要取り下げ)
@@ -9,6 +9,9 @@ Watch Registrations - 独立服务
 3. 用物件名在 SUUMO 上做キーワード搜索, 按 rent±0.5万 & area±2m2 过滤
 4. 过滤后剩下的 cassette 数 = 登録店舗数(一般一家中介一次登録该房间)
 5. 写回「登録店舗数」列。搜不到或出错写 0
+
+**撤退判定はもう持たない**: 2026-05-07 に PV ベース動的撤退モジュール
+  /Users/developer_recika/Fango/PVMonitor/ に完全移管。本ファイルは観測 (登録店舗数の書込) 専任。
 
 该服务与物件评估服务(process_pipeline.py / workflow_trigger.py)完全独立:
   - 独立日志: logs/watch_registrations.log
@@ -59,12 +62,9 @@ SUUMO_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=04
 RENT_TOL_MAN = 0.5     # 万円
 AREA_TOL_M2 = 2.0      # m2
 
-# 自动撤退判定 (设 Status=要取り下げ, ad-script 看到后会撤掉广告)
-# 2026-04-30 更新: staff 判断「登録中介数の影響は大きくない」→ RETIRE_BY_LISTING_COUNT 暫時停用,
-# 公開日時 ≥ N 日のみで撤退。RETIRE_BY_AGE_DAYS を 3 → 4 に延長 (3 日撤退で起きていた 04-30 の 41 件
-# 一括撤退から少し緩和)。値は復活時のために残すが、判定ブロックはコメントアウト。
-RETIRE_BY_LISTING_COUNT = 10   # ⚠ 暫時停用 (2026-04-30) — 登録店舗数では撤退しない
-RETIRE_BY_AGE_DAYS = 4         # 公開日時 + 此天数 < 今日 → 要取り下げ (无论有无反响, 投放够久就撤)
+# 撤退判定は 2026-05-07 に PVMonitor へ完全移管 (/Users/developer_recika/Fango/PVMonitor/scripts/retire_by_pv.py)
+# 旧 RETIRE_BY_AGE_DAYS / RETIRE_BY_LISTING_COUNT 定数と判定ブロックは削除済み。
+# 本ファイルは観測 (登録店舗数の書込) 専任。
 
 LOG_FILE = Path("logs") / "watch_registrations.log"
 LOG_FILE.parent.mkdir(exist_ok=True)
@@ -276,29 +276,11 @@ def count_suumo_listings(page, building_name, target_rent_man, target_area_sqm):
 # ============================================================
 # Main
 # ============================================================
-def _days_since(date_str):
-    """date_str: YYYY-MM-DD 或 ISO datetime。返回距今天数(基于本地日期),无效返回 None"""
-    if not date_str:
-        return None
-    try:
-        d = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
-    except ValueError:
-        return None
-    return (datetime.now().date() - d).days
-
-
 def process_one(item, browser_page):
     reins_id = item["reins_id"]
     page_id = item["page_id"]
     name = item["building_name"]
     koukai_date = item.get("koukai_date", "")
-
-    # 撤退判定 1: 投放年龄 ≥ RETIRE_BY_AGE_DAYS 天 → 直接撤, 不必再查 SUUMO
-    age_days = _days_since(koukai_date)
-    if age_days is not None and age_days >= RETIRE_BY_AGE_DAYS:
-        log(f"  ⚠ 公開日時={koukai_date} (距今 {age_days} 天 ≥ {RETIRE_BY_AGE_DAYS}) → 要取り下げ")
-        notion_update(page_id, {"Status": {"status": {"name": "要取り下げ"}}})
-        return "retire_by_age"
 
     # 拉物件详情用于 SUUMO 搜索
     details = fetch_property_details(reins_id)
@@ -307,19 +289,12 @@ def process_one(item, browser_page):
         notion_update(page_id, {"登録店舗数": {"number": 0}})
         return "skip_no_data"
 
-    log(f"  物件名: {name} | 賃料: {details['rent_man']}万 | 面積: {details['area_sqm']}m2 | 公開={koukai_date} ({age_days}天)")
+    log(f"  物件名: {name} | 賃料: {details['rent_man']}万 | 面積: {details['area_sqm']}m2 | 公開={koukai_date}")
     count = count_suumo_listings(browser_page, name,
                                   details["rent_man"], details["area_sqm"])
 
     value = int(count) if count and count > 0 else 0
     update_props = {"登録店舗数": {"number": value}}
-
-    # 撤退判定 2: 登録店舗数 ≥ RETIRE_BY_LISTING_COUNT → 要取り下げ
-    # 2026-04-30 暫時停用: staff 判断「登録中介数の影響は大きくない」。
-    # 登録店舗数の書き込み自体は維持 (観測用)、Status 自動変更だけ停止。
-    # if value >= RETIRE_BY_LISTING_COUNT:
-    #     update_props["Status"] = {"status": {"name": "要取り下げ"}}
-    #     log(f"  ⚠ 登録店舗数={value} ≥ {RETIRE_BY_LISTING_COUNT} → 同时设 Status=要取り下げ")
 
     ok = notion_update(page_id, update_props)
     if not ok:
@@ -402,7 +377,6 @@ def main():
     page = context.new_page()
 
     stats = {"success": 0, "not_found": 0,
-             "retire_by_age": 0, "retire_by_count": 0,
              "skip_no_data": 0, "update_failed": 0, "error": 0}
 
     try:

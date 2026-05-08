@@ -3,26 +3,25 @@
 """
 Sync Company Lists - 独立服务
 
-读取「新着物件おすすめ」DB 中 staff 填好的「会社広告可否」列,
-把判定写回到 data/blacklist_companies.txt / whitelist_companies.txt /
-data/management_companies.csv (case_by_case),
-让 process_pipeline 下次运行直接用上,该公司不再回到 確認待ち。
+读取「管理会社判定 DB」 (会社単位、env COMPANY_JUDGMENT_DB_ID) staff が判定済みの行を
+data/blacklist_companies.txt / whitelist_companies.txt / data/management_companies.csv (case_by_case)
+に反映、process_pipeline の次回実行で会社判定が即座に効くようにする。
 
 工作流(staff 视角):
-  staff 在 新着物件おすすめ DB 处理物件时,顺手在「会社広告可否」列填:
+  staff は「管理会社判定 DB」だけを見て、各会社の「会社広告可否」を:
     可 / 不可 / 物件による
-  (留空表示暂不判定,本脚本忽略)
+  と select する (空のままなら本 script は無視)
 
 工作流(脚本视角):
-  1. 拉「会社広告可否 != 空」的全部行
-  2. 按 管理会社 聚合, 多行同公司不同判定时取最近 last_edited_time
-  3. 校验现有 blacklist/whitelist/case_by_case 文件
-  4. 新增/更新对应文件; 同公司之前在另一类的, 移过来
-  5. 不删 staff 在 Notion 上的填值 (作为审计记录)
+  1. 管理会社判定 DB から「会社広告可否 != 空」の全行を取得
+  2. 1 社 1 判定 (DB 構造上重複なし) — title (会社名) と select (会社広告可否) を抜く
+  3. 既存 blacklist / whitelist / case_by_case と突合
+  4. 新規追加 / 別カテゴリへ移動を反映
+  5. Notion 側の判定は変更しない (audit 記録)
 
-幂等: 重复运行只会跳过已经一致的条目, 不会重复写入。
+幂等: 重複実行しても変化のないエントリは skip。
 
-调度建议(launchd 或 cron): 每天 1 次, 或在 watch_registrations 后跑。
+調度: launchd 毎日 1 回 (jp.ango.synccompanylists)。
 """
 import os
 import sys
@@ -45,7 +44,7 @@ sys.stdout.reconfigure(line_buffering=True)
 # 配置
 # ============================================================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おすすめ (2026-04-28 合并后唯一 TOP DB)
+COMPANY_JUDGMENT_DB_ID = os.getenv("COMPANY_JUDGMENT_DB_ID")  # 管理会社判定 DB (会社単位)
 
 DATA_DIR = Path("data")
 BLACKLIST_FILE = DATA_DIR / "blacklist_companies.txt"
@@ -202,27 +201,28 @@ def remove_case_from_csv(names_to_remove):
 # 主逻辑
 # ============================================================
 def collect_judgments():
-    """从 新着物件おすすめ DB 收集已填的 会社広告可否, 按公司聚合(冲突取最近 last_edited_time)"""
-    pages = notion_query(RECOMMEND_DATABASE_ID, filter_obj={
+    """管理会社判定 DB から「会社広告可否 != 空」の row を取得し、{会社名: 判定} の dict に。
+    1 社 1 row が前提 (新 DB 構造)。title プロパティ名は schema 依存なので type で検出。"""
+    if not COMPANY_JUDGMENT_DB_ID:
+        log("ERROR: COMPANY_JUDGMENT_DB_ID 未設定 (.env を確認)")
+        return {}
+    pages = notion_query(COMPANY_JUDGMENT_DB_ID, filter_obj={
         "property": "会社広告可否",
         "select": {"is_not_empty": True}
     })
-
-    # company -> (judgment, last_edited_time)
     by_company = {}
     for p in pages:
         props = p["properties"]
         company = ""
-        if props.get("管理会社", {}).get("rich_text"):
-            company = props["管理会社"]["rich_text"][0]["plain_text"].strip()
+        for prop_val in props.values():
+            if prop_val.get("type") == "title":
+                company = "".join(t["plain_text"] for t in prop_val["title"]).strip()
+                break
         sel = props.get("会社広告可否", {}).get("select")
         judgment = sel.get("name") if sel else None
-        edited = p.get("last_edited_time", "")  # ISO8601, 字符串比较即可
         if not company or not judgment:
             continue
-        prev = by_company.get(company)
-        if not prev or edited > prev[1]:
-            by_company[company] = (judgment, edited)
+        by_company[company] = judgment
     return by_company
 
 
@@ -238,7 +238,7 @@ def main():
     log(f"现有: blacklist={len(blacklist)} whitelist={len(whitelist)} case_by_case={len(case_by_case)}")
 
     # 2. 拉 Notion 判定
-    log("拉取 新着物件おすすめ DB 的 会社広告可否 ...")
+    log("拉取 管理会社判定 DB 的 会社広告可否 ...")
     judgments = collect_judgments()
     log(f"staff 已填 判定: {len(judgments)} 个公司")
 
@@ -252,7 +252,7 @@ def main():
     new_to_case = []
     moved = []  # (company, from_list, to_list)
 
-    for company, (judgment, edited) in sorted(judgments.items()):
+    for company, judgment in sorted(judgments.items()):
         # 目标列表
         target = {"可": "white", "不可": "black", "物件による": "case"}.get(judgment)
         if not target:
