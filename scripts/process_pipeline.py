@@ -33,6 +33,7 @@ load_dotenv()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"
 RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おすすめ (合并后唯一 TOP DB, 2026-04-28)
+COMPANY_JUDGMENT_DB_ID = os.getenv("COMPANY_JUDGMENT_DB_ID")  # 管理会社判定 DB (会社単位、未設定時は relation スキップ)
 # 注: 旧 PENDING_DATABASE_ID (3181...) 已废弃, 122 行迁到 おすすめ DB
 
 # 截止时间（JST）— 每天 11:00, 15:00, 19:00, 23:00 是新物件登载截止时间
@@ -40,6 +41,9 @@ RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おす
 JST = timezone(timedelta(hours=9))
 CUTOFF_HOURS = [11, 15, 19, 23]
 CUTOFF_MINUTE = 0
+
+# 評価中の cutoff (worker が物件を処理する瞬間の値)。main で set、cutoff またぎで更新される
+_CURRENT_CUTOFF = None
 
 # 阈值
 VIEW_THRESHOLD = 6.0           # view < 此值跳过后续步骤
@@ -100,6 +104,8 @@ WORKER_COUNT = int(os.getenv("WORKER_COUNT", "3"))
 _notion_lock = threading.Lock()
 _stats_lock = threading.Lock()
 _log_lock = threading.Lock()
+_company_page_cache = {}             # 管理会社判定 DB の name → page_id (process 単位 cache)
+_company_cache_lock = threading.Lock()
 
 
 def log(msg):
@@ -244,6 +250,56 @@ def notion_archive(page_id):
         return r.status_code == 200
     except Exception as e:
         return False
+
+
+def _lookup_or_create_company(name):
+    """管理会社判定 DB の page_id を返す。未登録なら空判定で create。
+    COMPANY_JUDGMENT_DB_ID 未設定 / API 失敗時は None を返す (pipeline は止めない)。
+    """
+    if not name or not COMPANY_JUDGMENT_DB_ID:
+        return None
+    with _company_cache_lock:
+        if name in _company_page_cache:
+            return _company_page_cache[name]
+        page_id = None
+        try:
+            r = requests.post(
+                f"https://api.notion.com/v1/databases/{COMPANY_JUDGMENT_DB_ID}/query",
+                headers=notion_headers,
+                json={"filter": {"property": "会社名", "title": {"equals": name}}, "page_size": 1},
+                timeout=30,
+            )
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                if results:
+                    page_id = results[0]["id"]
+            else:
+                log(f"  会社 lookup HTTP {r.status_code}: {name}")
+        except Exception as e:
+            log(f"  会社 lookup 例外 [{name}]: {str(e)[:80]}")
+            return None
+        if not page_id:
+            try:
+                r = requests.post(
+                    "https://api.notion.com/v1/pages",
+                    headers=notion_headers,
+                    json={
+                        "parent": {"database_id": COMPANY_JUDGMENT_DB_ID},
+                        "properties": {"会社名": {"title": [{"text": {"content": name}}]}},
+                    },
+                    timeout=30,
+                )
+                if r.status_code == 200:
+                    page_id = r.json()["id"]
+                    log(f"    新会社 upsert (空判定): {name}")
+                else:
+                    log(f"  会社 create HTTP {r.status_code}: {name} {r.text[:100]}")
+            except Exception as e:
+                log(f"  会社 create 例外 [{name}]: {str(e)[:80]}")
+                return None
+        if page_id:
+            _company_page_cache[name] = page_id
+        return page_id
 
 
 # ============================================================
@@ -1026,7 +1082,11 @@ def reins_id_exists_in_top(db_id, reins_id):
 def add_to_top_db(db_id, db_name, prop, listing_count=None, status_name="広告待ち"):
     """物件实时添加到 TOP DB. 去重(REINS_ID 已存在则跳过), 不再有大小上限。
     listing_count: 写入时同步设置「登録店舗数」字段(免得 watch_registrations 2h 后才填)
-    status_name: 初始 Status (可→広告待ち; 確認待ち→確認待ち, staff 还需走商号判定)"""
+    status_name: 初始 Status (可→広告待ち; 確認待ち→確認待ち, staff 还需走商号判定)
+    管理会社判定 DB が設定されていれば 管理会社_relation 列もセット (会社単位確認運用)"""
+    company = prop.get("management_company", "")
+    company_page_id = _lookup_or_create_company(company) if company else None
+
     with _notion_lock:
         if reins_id_exists_in_top(db_id, prop["reins_id"]):
             return False  # 已存在
@@ -1035,12 +1095,14 @@ def add_to_top_db(db_id, db_name, prop, listing_count=None, status_name="広告�
             "REINS_ID": {"title": [{"text": {"content": prop["reins_id"]}}]},
             "推薦点数": {"number": prop["score"]},
             "物件名": {"rich_text": [{"text": {"content": prop.get("building_name", "")}}]} if prop.get("building_name") else {"rich_text": []},
-            "管理会社": {"rich_text": [{"text": {"content": prop.get("management_company", "")}}]} if prop.get("management_company") else {"rich_text": []},
+            "管理会社": {"rich_text": [{"text": {"content": company}}]} if company else {"rich_text": []},
             "公開日時": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}},
             "Status": {"status": {"name": status_name}}
         }
         if listing_count is not None:
             properties["登録店舗数"] = {"number": int(listing_count)}
+        if company_page_id:
+            properties["管理会社_relation"] = {"relation": [{"id": company_page_id}]}
 
         if notion_create(db_id, properties):
             extra = f" 登録店舗数={listing_count}" if listing_count is not None else ""
@@ -1063,7 +1125,10 @@ def process_property(prop_data, browser_page, browser_context):
         return "no_rent"
 
     view = predict_view(prop_data)
-    notion_update(page_id, {"予測_view数": {"number": view}})
+    step1_props = {"予測_view数": {"number": view}}
+    if _CURRENT_CUTOFF is not None:
+        step1_props["評価バッチ"] = {"date": {"start": _CURRENT_CUTOFF.isoformat()}}
+    notion_update(page_id, step1_props)
     log(f"  view: {view} | ¥{prop_data['rent']:,} {prop_data.get('area_sqm','?')}㎡ {prop_data.get('city','')} {prop_data.get('floor_plan','')}")
 
     # Step 2: 低分跳过
@@ -1196,6 +1261,31 @@ def fetch_unscored_properties(cutoff):
     )
 
 
+def expire_stale_pending(cutoff):
+    """前のバッチで評価された確認待ち物件を 時間超過 にマーク。
+
+    判定: おすすめ DB で Status=確認待ち かつ Created time < cutoff
+    (= 直近 cutoff より前にパイプラインが書き込んだ row。staff が次のセッション
+    までに判定しなかったので時間切れ扱いとし、staff の注意を最新物件に集中させる)
+    """
+    pages = notion_query(
+        RECOMMEND_DATABASE_ID,
+        filter_obj={
+            "and": [
+                {"property": "Status", "status": {"equals": "確認待ち"}},
+                {"timestamp": "created_time", "created_time": {"before": cutoff.isoformat()}}
+            ]
+        }
+    )
+    if not pages:
+        return 0
+    n = 0
+    for p in pages:
+        if notion_update(p["id"], {"Status": {"status": {"name": "時間超過"}}}):
+            n += 1
+    return n
+
+
 def _route_filter(route):
     """拦截图片/字体/CSS/分析脚本,加速 Playwright 页面加载"""
     rt = route.request.resource_type
@@ -1263,13 +1353,20 @@ def _fill_queue(work_queue, pages):
 
 
 def main():
+    global _CURRENT_CUTOFF
     log("=" * 60)
     log("Property Processing Pipeline V2 - 截止时间感知")
     log(f"WORKER_COUNT = {WORKER_COUNT}")
     log("=" * 60)
 
     current_cutoff = get_current_cutoff()
+    _CURRENT_CUTOFF = current_cutoff
     log(f"\n当前截止时间: {current_cutoff.strftime('%Y-%m-%d %H:%M JST')}")
+
+    # 前バッチ確認待ち → 時間超過 (staff の注意を最新物件に集中させる)
+    expired = expire_stale_pending(current_cutoff)
+    if expired:
+        log(f"前バッチ確認待ち {expired} 件 → 時間超過")
 
     log("查询未评分物件...")
     pages = fetch_unscored_properties(current_cutoff)
@@ -1317,6 +1414,10 @@ def main():
                     except Empty:
                         break
                 current_cutoff = new_cutoff
+                _CURRENT_CUTOFF = new_cutoff
+                expired = expire_stale_pending(current_cutoff)
+                if expired:
+                    log(f">>> 前バッチ確認待ち {expired} 件 → 時間超過")
                 pages = fetch_unscored_properties(current_cutoff)
                 added = _fill_queue(work_queue, pages)
                 log(f">>> 新队列: {added} 个")

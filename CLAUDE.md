@@ -1,6 +1,8 @@
 # Fango ADS — 项目快照(给未来的 Claude 看)
 
+> 上位俯瞰 (2 プロジェクト境界 / Notion DB 全体マップ / Status 状態遷移 / launchd 全表) → [`../CLAUDE.md`](../CLAUDE.md)
 > 子系统深度文档 → [`skills/README.md`](skills/README.md) (5 个 workflow 各自一份)
+> 撤退判定の別プロジェクト → [`../PVMonitor/CLAUDE.md`](../PVMonitor/CLAUDE.md)
 
 ## 一段话项目说明
 
@@ -25,6 +27,8 @@ workflow_trigger.py  (daemon, nohup 启动)
 
 launchd: jp.ango.watchregistrations  (~/Library/LaunchAgents/)
   └── 每天 12 次 (0:30, 2:30, …, 22:30 JST) → watch_registrations.py
+       **観測専任** (2026-05-07〜): 登録店舗数を SUUMO kwd 検索で数えて Notion に書込のみ。
+       撤退判定は PVMonitor (別プロジェクト) に移管。
 
 launchd: jp.ango.synccompanylists
   └── 每天 1 次 (01:00 JST) → sync_company_lists.py
@@ -33,7 +37,15 @@ launchd: jp.ango.synccompanylists
 launchd: jp.ango.archiverecommendations
   └── 每周日 1 次 (02:00 JST) → archive_old_recommendations.py
        两个 TOP DB 里 Status 终态 + Created time > 30 天 的 row 软归档(archived=true)
+
+launchd: jp.ango.syncoutcomes
+  └── 每天 1 次 (03:00 JST) → sync_outcomes.py
+       広告管理 DB(db_defb)の反響数 を REINS_ID 単位で集計し
+       おすすめ.実反響数 へ反映 + data/outcomes_history.csv に追記
+       (self-learning-loop Phase 1 Step 1 — LR/重訓の訓練データ通路)
 ```
+
+> **撤退判定は別プロジェクト** PVMonitor に分離 (2026-05-07〜)。詳細は [`../PVMonitor/CLAUDE.md`](../PVMonitor/CLAUDE.md)。ADS 側 `watch_registrations.py` は **観測専任**(SUUMO 中介数を Notion に書き込むのみ、撤退判定なし)。
 
 ## 关键文件(只看这几个就够)
 
@@ -44,6 +56,7 @@ launchd: jp.ango.archiverecommendations
 | `scripts/watch_registrations.py` | 独立的中介数监视(SUUMO kwd 搜索) |
 | `scripts/sync_company_lists.py` | 把 staff 在 Notion 的判定同步到 blacklist/whitelist/case_by_case |
 | `scripts/archive_old_recommendations.py` | 终态 + 30 天后软归档 TOP DB row(防膨胀) |
+| `scripts/sync_outcomes.py` | 広告管理 DB → おすすめ.実反響数 + outcomes_history.csv (LR/重訓 用訓練データ通路) |
 | `scripts/launchd/*.plist` | launchd 调度模板 |
 | `config.py` | SUUMO 登录 + DB URL |
 | `.env` / `.env.example` | NOTION_API_KEY / SUUMO_USERNAME / REINS 等 |
@@ -70,8 +83,6 @@ launchd: jp.ango.archiverecommendations
 | `POLL_INTERVAL` | 10*60 | `workflow_trigger.py:58` | Notion 轮询间隔(秒) |
 | `RENT_TOL_MAN` | 0.5 | `watch_registrations.py:54` | 同房间过滤容差(万円) |
 | `AREA_TOL_M2` | 2.0 | 同上 | 同房间过滤容差(m²) |
-| `RETIRE_BY_LISTING_COUNT` | 10 (**暫時停用**) | `watch_registrations.py:64` | 2026-04-30 から判定停止 (staff 「登録中介数の影響は大きくない」)。値は復活時のため残し、登録店舗数の書き込み自体は維持 |
-| `RETIRE_BY_AGE_DAYS` | 4 | `watch_registrations.py:65` | 公開日時 距今 ≥ 此天数自动设 Status=要取り下げ(无论反响)。2026-04-30 に 3 → 4 に延長 |
 | `ARCHIVE_AFTER_DAYS` | 30 | `archive_old_recommendations.py:39` | TOP 表终态 row 多久后软归档 |
 
 **注**: TOP DB **不再有大小上限**(原 `MAX_RECOMMENDATIONS=20` 于 2026-04-27 移除)。改由 `archive_old_recommendations.py` 周期归档终态老 row, 让 ad-script 能完整跟踪生命周期不被新进物件顶掉。
@@ -82,17 +93,18 @@ launchd: jp.ango.archiverecommendations
 |---|---|---|
 | MAIN(全物件) | `3031c197-4dad-800b-917d-d09b8602ec39` | 物件原始库, 字段最全 |
 | 新着物件おすすめ TOP | `3171c1974dad80439367df13aa67f012` | **唯一 TOP DB** (2026-04-28 合并 確認待ち 进来) |
+| 広告管理 (db_defb / ファンテイズ-forrent) | `defb9f3b-ccc3-4ae4-87b4-41ef7a1c0754` | ad-system 投放実績、反響数 (rollup), sync_outcomes.py がここから集計 |
 | ~~確認待ち物件~~ | `3181c1974dad80279cb7dfdeb92b946f` | **2026-04-28 已废弃**, 122 行迁到おすすめ, 当前 0 行非归档 |
 
-おすすめ 字段: `REINS_ID(title)` / `物件名(rich_text)` / `推薦点数(number)` / `管理会社(rich_text)` / `公開日時(date)` / `登録店舗数(number)` / `Status(status)` / `会社広告可否(select)`
+おすすめ 字段: `REINS_ID(title)` / `物件名(rich_text)` / `推薦点数(number)` / `管理会社(rich_text)` / `公開日時(date)` / `登録店舗数(number)` / `Status(status)` / `会社広告可否(select)` / `実反響数(number)` (sync_outcomes.py が日次更新, self-learning Phase 1)
 
-おすすめ Status (3-2-3 group):
+おすすめ Status (3-2-4 group, 2026-05-08 〜 `時間超過` 追加):
 
 | Group | Options |
 |---|---|
 | **To-do** | `確認待ち` / `広告待ち` / `掲載保留` |
 | **In progress** | `掲載指示済み` / `要取り下げ` |
-| **Complete** | `取下済み` / `入稿失敗` / `広告掲載禁止` |
+| **Complete** | `取下済み` / `入稿失敗` / `広告掲載禁止` / `時間超過` |
 
 `会社広告可否` 选项: `可` / `不可` / `物件による` (空 = staff 未填) — staff 顺手填这个列, sync_company_lists.py 会同步到 .txt/.csv,下次 pipeline 该公司就不再 確認待ち。
 
@@ -101,13 +113,16 @@ launchd: jp.ango.archiverecommendations
 - 別の script(ad-script 团队的) 投稿 SUUMO 失败 → 设 `入稿失敗`
 - staff 手动决定永禁该物件 → 设 `広告掲載禁止`
 - 写入时 ad_status==可 → Status=広告待ち; ad_status==確認待ち → Status=確認待ち(staff 还需填 会社広告可否)
+- `確認待ち` で次の cutoff が来てもまだ放置 → ADS pipeline が自動で `時間超過` に遷移 (2026-05-08〜, 詳細は最近改動時間線)
 
-**watch_registrations 扫描范围**: 扫所有非终态 active row, 包括 staff 中间态(`掲載保留` / `要確認`)。**注**: staff 把 row 改成 `掲載保留` 不再代表"我手动暂停了别动"; 我们仍会监视, 一旦 登録店舗数 ≥ 10 或 公開日時 ≥ 3 天, 仍会自动设 `要取り下げ`。这样防止暂停态 row 永远逃过自动撤退判定。
+**watch_registrations は観測専任** (2026-05-07〜): SUUMO kwd 検索で「登録店舗数」を Notion に書き戻すだけで、Status は一切触らない。撤退判定は PVMonitor (`../PVMonitor/CLAUDE.md`) 担当。
 
 **谁设 `要取り下げ`**:
-1. `watch_registrations.py` 自动判定:登録店舗数 ≥ 10 OR 公開日時 距今 ≥ 3 天
-2. staff 手动(在 Notion UI 直接选)
-3. 未来更复杂的判定脚本(D3 反响零撤、score 重评等,A/B 文档里提的)
+1. **PVMonitor** `retire_by_pv.py` 自動判定 (PV ベース 2 段、毎日 04:00 JST)
+2. staff 手動(Notion UI で直接選択)
+
+**谁设 `時間超過`**:
+1. ADS `process_pipeline.py` の `expire_stale_pending` が pipeline 起動 / cutoff またぎのタイミングで自動セット (`Status=確認待ち AND Created time < 直近 cutoff` の row が対象)
 
 ## Bridge 通信 (analysis-claude ↔ ops-claude)
 
@@ -181,6 +196,8 @@ DRY_RUN=1 ./venv/bin/python scripts/archive_old_recommendations.py  # 干跑 不
 # 重新注册 launchd(改了 plist 后)
 launchctl unload ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
+
+# PVMonitor は別プロジェクト → ../PVMonitor/CLAUDE.md
 ```
 
 主要日志:
@@ -220,5 +237,8 @@ launchctl load   ~/Library/LaunchAgents/jp.ango.watchregistrations.plist
 - **2026-04-28** Bridge 通信基盤導入: `scripts/bridge.py` CLI で別 Claude セッション (analysis-claude) と Notion DB「Claude Bridge」(id `3501c197-4dad-806f-9a6d-d028a6f078b1`) 経由双方向通信。本体 `NOTION_API_KEY` と分離した `BRIDGE_NOTION_API_KEY`。workflow_trigger.py 起動時に未読件数を log に出す。詳細は CLAUDE.md「Bridge 通信」セクション。
 - **2026-04-30** WARD_REVERB_BONUS 追加 (analysis-claude #ward-reverb-efficiency 提案 → shrinkage 精算版採用): 11 区に ±0.43〜-0.13 の bonus (文京 +0.43 / 板橋 +0.16 / 中野 +0.13 / 新宿 +0.12 / 杉並 +0.12 / 世田谷 -0.07 / 大田 -0.13 等)。HOT_STATIONS と二重カウント回避 (HOT 適用時 ward bonus skip)。狙いは 世田谷一極集中の是正 (期待 +10 反响/月)、3 ヶ月毎に再キャリブ予定。
 - **2026-04-30** 自動撤退判定の見直し: staff 判断「登録中介数の影響は大きくない」→ `RETIRE_BY_LISTING_COUNT=10` 判定を **暫時停用** (登録店舗数の書き込み自体は観測用に維持)。`RETIRE_BY_AGE_DAYS=3 → 4` に延長 (3 日撤退で 04-30 に 41 件一括撤退発生したため緩和)。watch_registrations の撤退ロジックは「公開日時 + 4 日 < 今日」のみ。
+- **2026-04-30** **self-learning Phase 1 Step 1 着手** (`docs/2026-04-28_self_learning_roadmap.md`): `scripts/sync_outcomes.py` 新規 + launchd `jp.ango.syncoutcomes` daily 03:00 JST 登録. db_defb (広告管理/ファンテイズ-forrent, defb9f3b...) の `貴社物件コード` (= `AI`/`fng` + REINS_ID 12 桁、`og` 系は ad-system 独自で REINS なし) から prefix 剥がして REINS_ID 抽出 → おすすめ DB.実反響数 へ集計 + `data/outcomes_history.csv` 追記. 初回 745 投放 → 526 件 REINS 紐付け → 402 unique 物件 (反響>0: 34) / おすすめ 358 行のうち 89 行で `実反響数` を初期化. 写入逻辑が新規モデル/重訓に影響しない zero-dip ステップ. 次は Step 2 (lr_filter.py 抽出) 着手予定 — analysis-claude に train-from-csv vs reuse-coef を相談中.
+- **2026-05-07** **撤退判定を別プロジェクト PVMonitor に分離**: ADS 側 `watch_registrations.py` から age ベース撤退判定 (`RETIRE_BY_AGE_DAYS`) を削除、観測専任 (登録店舗数 を書き込むのみ) に変更。PV ベース動的判定 (Stage 1: 初期 PV 弱い / Stage 2: ピーク後失速) は PVMonitor で実装、毎日 04:00 JST に launchd で実行。詳細は [`../PVMonitor/CLAUDE.md`](../PVMonitor/CLAUDE.md)。
+- **2026-05-08** **評価バッチ列 + 確認待ち→時間超過 自動遷移 追加**: MAIN DB に `評価バッチ`(date 型) 列追加、pipeline Step 1 の `予測_view数` 書き込みと同じ `notion_update` に同居 (API call 増加なし)。値は処理時点の cutoff 時刻 (例: `2026-05-08T11:00:00+09:00`)。MAIN DB 列は集計用、Notion UI 上は非表示。さらに `expire_stale_pending(cutoff)` 関数追加: pipeline 起動時 + cutoff またぎ時に `Status=確認待ち AND Created time < 直近 cutoff` の row を一括で `Status=時間超過` に遷移。狙いは「次のセッションが来てしまった = もう判定する意味がない (他社が公開済の可能性大)」物件を自動切り捨てて、staff の注意を最新物件に集中させること。Notion `時間超過` Status option は staff が事前に手動追加済 (Complete グループ)。
 
 完整 git 历史: `git log --oneline` 在分支 `mac开发版1.0`(GitHub remote: `kokoAngo/ADS`)
