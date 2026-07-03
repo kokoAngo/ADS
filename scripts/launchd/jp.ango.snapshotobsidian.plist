@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>jp.ango.snapshotobsidian</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/developer_recika/Fango/ADS/venv/bin/python</string>
+        <string>/Users/developer_recika/Fango/ADS/scripts/snapshot_obsidian.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/developer_recika/Fango/ADS</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/developer_recika/Fango/ADS/logs/snapshot_obsidian.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/developer_recika/Fango/ADS/logs/snapshot_obsidian.launchd.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- 毎日 4 回、各 cutoff (11/15/19/23 JST) の +30 分後にスナップショット。
+         pipeline は普通 10 分以内に終わるので 30 分マージンで十分。 -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>11</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>19</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>23</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+    </array>
+</dict>
+</plist>

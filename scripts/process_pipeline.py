@@ -8,9 +8,11 @@ import sys
 import json
 import pickle
 import re
+import unicodedata
 import math
 import time
 import csv
+import random
 import threading
 import requests
 from pathlib import Path
@@ -46,14 +48,20 @@ CUTOFF_MINUTE = 0
 _CURRENT_CUTOFF = None
 
 # 阈值
-VIEW_THRESHOLD = 6.0           # view < 此值跳过后续步骤
-RECOMMEND_THRESHOLD = 5.8      # 推薦点数 >= 此值才写入TOP表
+VIEW_THRESHOLD = 3.0           # view < 此值跳过后续步骤 (2026-06-11: 6.0→3.0 引き下げ、view-only 化で評価コスト激減のため新着を広く拾う。価格 6万 / 不可仲介 skip は維持)
+RECOMMEND_THRESHOLD = 5.0       # 推薦点数 下限 (>= 此值才写入TOP表)
+RECOMMEND_UPPER_THRESHOLD = 7.0 # [DEPRECATED 2026-06-11] 旧·上限ゲート. view-only 化で撤廃 (高 view=最良物件を捨てる矛盾のため). 定数は互換で残置・未使用
 MAX_COMPETITION_FOR_ENTRY = 5  # SUUMO 上已被 > 此值家中介公开的物件 → 不写入 TOP 表(高竞争跳过)
+MIN_RENT_YEN = 60000           # 賃料 < 此値 → 評価せず skip (2026-06-11 追加、低額帯は反響薄く ROI 低い)
+# 築年「死亡帯」自動選品除外 (analysis-claude finding 2026-06-12: 築21-27年≒1999-2005年築は fng で 359投放0反響)。
+# 新耐震(1981)後・省エネ/設備標準アップグレード前の「中途半端」年代。動的計算 (現在年 - built_year)。
+DEAD_ZONE_AGE_MIN = 21         # 此区間 [MIN, MAX] (含む) の築年物件は おすすめ DB に書き込まない
+DEAD_ZONE_AGE_MAX = 27
 # 注: 之前有 MAX_RECOMMENDATIONS=20 的滚动上限, 2026-04-27 移除以支持广告生命周期跟踪
 # (满 20 时自动 archive 最老一条 → 但可能 archive 掉还在投放中的 row → ad-script 失联)
 # 现在 TOP DB 不限大小, 由 scripts/archive_old_recommendations.py 周期归档终态老 row
 
-# 推薦点数权重
+# 推薦点数权重 [DEPRECATED 2026-06-11] view-only 化で未参照. 互換で残置 (calculate_recommendation は view+加点のみ)
 WEIGHTS = {
     'view_score': 0.30,
     'inquiry_score': 0.25,
@@ -93,7 +101,7 @@ WARD_REVERB_BONUS = {
 
 DATA_DIR = Path("data")
 BLACKLIST_FILE = DATA_DIR / "blacklist_companies.txt"
-WHITELIST_FILE = DATA_DIR / "whitelist_companies.txt"
+WHITELIST_FILE = DATA_DIR / "whitelist_companies.txt"   # 会社共通 (どの中介が出すかに依らない)
 FULL_DATA_FILE = DATA_DIR / "management_companies.csv"
 
 LOG_FILE = Path("logs") / "process_pipeline.log"
@@ -310,6 +318,22 @@ TOKYO_WARDS = ['千代田区', '中央区', '港区', '新宿区', '文京区', 
                '杉並区', '豊島区', '北区', '荒川区', '板橋区', '練馬区', '足立区',
                '葛飾区', '江戸川区']
 
+# ============================================================
+# 会社別カバーエリア (2026-06 派発分割: funts / Summit Society)
+#   Summit Society = 中心 15 区のみ (賃貸エリア)
+#   funts          = 23 区 + 2 市 (武蔵野/三鷹)
+#   両社可かつ 15 区の物件は SLOT_CAP 比でランダム振り分け (decide_assignee)
+# ============================================================
+SUMMIT_WARDS = {'港区', '渋谷区', '中央区', '千代田区', '文京区', '品川区', '目黒区',
+                '世田谷区', '新宿区', '中野区', '杉並区', '江東区', '台東区', '墨田区', '豊島区'}  # 15
+FUNTS_CITIES = ['武蔵野市', '三鷹市']
+FUNTS_AREA = set(TOKYO_WARDS) | set(FUNTS_CITIES)   # 23 区 + 2 市 = 25
+COVERAGE_DETECT = TOKYO_WARDS + FUNTS_CITIES        # 所在地 → 区/市 判定用 (2 市も拾う)
+
+COMPANY_FUNTS = "funts"
+COMPANY_SUMMIT = "Summit Society"
+SLOT_CAP = {COMPANY_FUNTS: 50, COMPANY_SUMMIT: 10}   # SUUMO 套餐枠 (U4 簡易版は枠比のみ使用)
+
 
 def parse_months(text):
     """解析敷金/礼金: '1ヶ月/-'→1.0, 'なし/-'→0.0"""
@@ -325,6 +349,18 @@ def parse_months(text):
         return 0.0
     m = re.search(r'([\d.]+)', first)
     return float(m.group(1)) if m else 0.0
+
+
+def _parse_floor(text):
+    """所在階文字列 → 地上階数(int)。表記混在に対応:
+       「2」「2階」→ 2 / 「B1」「地下1階」「-1」→ None(地下扱い) / 空·解析不能 → None。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if text.upper().startswith("B") or "地下" in text or text.startswith("-"):
+        return None  # 地下は地上階数なし → 2 階以上判定の対象外 (=TOP 投稿 skip)
+    m = re.search(r"\d+", text)
+    return int(m.group()) if m else None
 
 
 def extract_property(page):
@@ -378,11 +414,11 @@ def extract_property(page):
     if madori:
         data["floor_plan"] = madori
 
-    # 所在地 → 区
+    # 所在地 → 区 / 市 (23区 + 武蔵野/三鷹)
     address = get_text("所在地")
     if address:
         data["address"] = address
-        for ward in TOKYO_WARDS:
+        for ward in COVERAGE_DETECT:
             if ward in address:
                 data["city"] = ward
                 break
@@ -427,6 +463,12 @@ def extract_property(page):
     building = get_text("建物名")
     if building:
         data["building_name"] = building
+
+    # 所在階 (REINS は「2」「2階」「B1」「地下1階」等 表記混在)。floor=地上階数(int)、地下/不明は None
+    floor_text = get_text("所在階")
+    if floor_text:
+        data["floor_raw"] = floor_text.strip()
+        data["floor"] = _parse_floor(floor_text)
 
     return data if data.get("bukken_number") else None
 
@@ -562,7 +604,8 @@ def predict_inquiry(data):
 # Step 2: 管理公司检查
 # ============================================================
 def check_management(company_name):
-    """返回 可 / 不可（仲介） / 物件による / 確認待ち"""
+    """会社共通の管理会社可否を返す: 可 / 不可（仲介） / 物件による / 確認待ち。
+    どの中介(funts/Summit)が出すかには依存しない (担当はエリアで別途決定)。"""
     if not company_name:
         return "確認待ち"
     if match_company(company_name, BLACKLIST):
@@ -973,9 +1016,25 @@ def _kwd_normalize_name(name):
     name = re.sub(r"\([^)]*\)", "", name)
     # 去尾部的「XXX号室」(全/半角数字和漢数字)
     name = re.sub(r"[\s　]?[\dO〇零一二三四五六七八九十百千０-９]+\s*号\s*室\s*$", "", name)
+    # 末尾の棟番号除去 (2026-06-15: SUUMO 検索で「Ⅱ」等が付くと 0 件→競合見逃しになるバグ修正。
+    #   別棟が混ざっても後段の rent/area フィルタで同部屋に収束する。watch_registrations と同一規則)
+    name = re.sub(r"[\s　]?[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫⅰⅱⅲⅳⅴ]+\s*$", "", name)               # Unicodeローマ数字棟
+    name = re.sub(r"[\s　]?[A-ZＡ-Ｚ0-9０-９一二三四五六七八九]\s*号?棟\s*$", "", name)     # A棟 / 2号棟 等
+    name = re.sub(r"[\s　](?:VIII|VII|VI|IV|IX|III|II|V|X)\s*$", "", name)                 # ラテンローマ数字棟
     # 多余空格压缩(保留至少一个 半角空格, 复数空格 → 单个)
     name = re.sub(r"[\s　]{2,}", " ", name)
     return name.strip()
+
+
+def _dedup_key(name):
+    """建物単位 dedup 用の正規化キー (2026-06-18)。
+    _kwd_normalize_name(括弧読み/号室/棟番号 除去) に加え、NFKC(全角→半角・カタカナ統一)
+    + 全空白除去 + 小文字化で、表記揺れ(「ＳＥＡＳＯＮ ＣＯＵＲＴ」↔「SEASONCOURT」)・
+    別部屋・別棟番号を同一建物として 1 棟に集約する。"""
+    n = _kwd_normalize_name(name)
+    n = unicodedata.normalize("NFKC", n)
+    n = re.sub(r"\s+", "", n)
+    return n.lower()
 
 
 def _kwd_parse_cassette(text):
@@ -1043,17 +1102,12 @@ def _kwd_count_listings(page, building_name, target_rent_man, target_area_sqm):
 # ============================================================
 # Step 6: 推薦点数计算
 # ============================================================
-def calculate_recommendation(view, inquiry, ad_count, station=None, ward=None):
+def calculate_recommendation(view, station=None, ward=None):
+    # 2026-06-11 簡素化: 推薦点数 = 予測 view 数 (10 頭打ち) + 加分区域 (HOT駅 / 区) のみ。
+    # 旧式の inquiry / competition / market 加重和は廃止 (predict_inquiry / query_ad_count /
+    # query_market_rank も Step4-6 で暫時停用)。WEIGHTS は未参照になったが deprecated で残置。
     norm_view = min(view / 10, 1.0) * 10
-    norm_inquiry = min(inquiry / 5, 1.0) * 10
-    competition = max(0, 10 - (ad_count - 1) * 0.5) if ad_count else 5.0
-    market = norm_view  # 暂用 view 作为市场指标
-    total = (
-        norm_view * WEIGHTS['view_score'] +
-        norm_inquiry * WEIGHTS['inquiry_score'] +
-        competition * WEIGHTS['competition'] +
-        market * WEIGHTS['market_rank']
-    )
+    total = norm_view
     # 热门駅 / 区 加分 (HOT_STATIONS 优先, 二重カウント回避)
     is_hot_station = False
     if station:
@@ -1079,7 +1133,46 @@ def reins_id_exists_in_top(db_id, reins_id):
     return len(hits) > 0
 
 
-def add_to_top_db(db_id, db_name, prop, listing_count=None, status_name="広告待ち"):
+# 建物単位 dedup (2026-06-18): TOP DB の active(現役)建物を 1 棟 1 件に集約。
+# これ以外の Status は終態とみなし dedup 対象外 (再募集時は再投稿可)。
+TOP_ACTIVE_STATUSES = ["確認待ち", "広告待ち", "掲載中", "掲載保留", "掲載指示済み", "要取り下げ"]
+# 注: 「画像欠落」は終態扱い (dedup 対象外、2026-06-18 ユーザー確認)。「掲載中」は新 option で
+#     現状未使用 (0 件) だが将来 ad-script が使う場合に備え active に含める。
+_seen_building_keys = set()       # 現役建物の正規化キー集合 (worker 間で _notion_lock 下共有)
+_building_keys_loaded = False     # pipeline 実行中の初回ロード済みフラグ
+
+
+def _load_active_building_keys(db_id):
+    """TOP DB の active row の建物正規化キーを _seen_building_keys にロード (起動時 1 回)。"""
+    flt = {"or": [{"property": "Status", "status": {"equals": s}} for s in TOP_ACTIVE_STATUSES]}
+    try:
+        hits = notion_query(db_id, filter_obj=flt)
+    except Exception as e:
+        log(f"  build dedup: active キー取得失敗 {str(e)[:80]}")
+        return
+    for hit in hits:
+        v = hit["properties"].get("物件名", {}).get("rich_text") or []
+        if v:
+            k = _dedup_key(v[0]["plain_text"])
+            if k:
+                _seen_building_keys.add(k)
+    log(f"  build dedup: active 建物キー {len(_seen_building_keys)} 件ロード")
+
+
+def decide_assignee(funts_elig, summit_elig):
+    """両社可 物件を SLOT_CAP 比 (funts:Summit = 50:10) でランダム振り分け (U4 簡易版)。
+    片側のみ eligible ならそのまま確定。SS go-live 時に「空き枠連動」版へ差し替え予定。"""
+    if funts_elig and summit_elig:
+        f, s = SLOT_CAP[COMPANY_FUNTS], SLOT_CAP[COMPANY_SUMMIT]
+        return COMPANY_FUNTS if random.random() * (f + s) < f else COMPANY_SUMMIT
+    if funts_elig:
+        return COMPANY_FUNTS
+    if summit_elig:
+        return COMPANY_SUMMIT
+    return None
+
+
+def add_to_top_db(db_id, db_name, prop, listing_count=None, status_name="広告待ち", assignee=None):
     """物件实时添加到 TOP DB. 去重(REINS_ID 已存在则跳过), 不再有大小上限。
     listing_count: 写入时同步设置「登録店舗数」字段(免得 watch_registrations 2h 后才填)
     status_name: 初始 Status (可→広告待ち; 確認待ち→確認待ち, staff 还需走商号判定)
@@ -1091,6 +1184,17 @@ def add_to_top_db(db_id, db_name, prop, listing_count=None, status_name="広告�
         if reins_id_exists_in_top(db_id, prop["reins_id"]):
             return False  # 已存在
 
+        # 建物単位 dedup: 同一建物 (名前正規化一致) が既に active で TOP に居れば skip。
+        # 別部屋・表記揺れ・別棟番号も 1 棟 1 件に集約 (2026-06-18)。
+        global _building_keys_loaded
+        if not _building_keys_loaded:
+            _load_active_building_keys(db_id)
+            _building_keys_loaded = True
+        bkey = _dedup_key(prop.get("building_name", ""))
+        if bkey and bkey in _seen_building_keys:
+            log(f"    ⏭ 同一建物が既に TOP に存在 → skip ({prop['reins_id']} {prop.get('building_name','')[:22]})")
+            return False
+
         properties = {
             "REINS_ID": {"title": [{"text": {"content": prop["reins_id"]}}]},
             "推薦点数": {"number": prop["score"]},
@@ -1101,11 +1205,16 @@ def add_to_top_db(db_id, db_name, prop, listing_count=None, status_name="広告�
         }
         if listing_count is not None:
             properties["登録店舗数"] = {"number": int(listing_count)}
+        if assignee:
+            properties["担当会社"] = {"select": {"name": assignee}}   # funts / Summit Society
         if company_page_id:
             properties["管理会社_relation"] = {"relation": [{"id": company_page_id}]}
 
         if notion_create(db_id, properties):
+            if bkey:
+                _seen_building_keys.add(bkey)
             extra = f" 登録店舗数={listing_count}" if listing_count is not None else ""
+            extra += f" 担当={assignee}" if assignee else " 担当=未定"
             log(f"    → 写入 {db_name}: {prop['reins_id']} ({prop['score']}分) Status={status_name}{extra}")
             return True
         return False
@@ -1123,6 +1232,9 @@ def process_property(prop_data, browser_page, browser_context):
     if not prop_data.get("rent"):
         log(f"  缺少賃料，跳过")
         return "no_rent"
+    if prop_data["rent"] < MIN_RENT_YEN:
+        log(f"  賃料 ¥{prop_data['rent']:,} < ¥{MIN_RENT_YEN:,} → skip (low_rent)")
+        return "low_rent"
 
     view = predict_view(prop_data)
     step1_props = {"予測_view数": {"number": view}}
@@ -1139,7 +1251,7 @@ def process_property(prop_data, browser_page, browser_context):
         })
         return "low_view"
 
-    # Step 3: 管理公司检查
+    # Step 3: 管理公司检查 (会社共通の可否)
     company = prop_data.get("management_company", "")
     ad_status = check_management(company)
     notion_update(page_id, {"広告可": {"select": {"name": ad_status}}})
@@ -1150,43 +1262,49 @@ def process_property(prop_data, browser_page, browser_context):
         notion_update(page_id, {"市場順位": {"rich_text": [{"text": {"content": "--"}}]}})
         return "unallowed"
 
-    # Step 4: 反响数预测
-    inquiry = predict_inquiry(prop_data)
-    notion_update(page_id, {"予測_反響数": {"number": inquiry}})
-    log(f"  反響: {inquiry}")
+    # 2026-06-11 暫時停用: 推薦点数を view+加点のみに変更したため、Step 4/5/6 (予測反響数 /
+    # 市場順位 / 広告数) の計算を停止。Notion 列 (予測_反響数 / 市場順位 / 広告数) はプロパティ
+    # 自体は残置 (新規 row では空のまま、既存 row は触らない)。
+    # Step 5/6 は SUUMO Playwright スクレイプだったため停止で pipeline 高速化。
+    # 復活させる場合はこのブロックを解除し、calculate_recommendation の旧式加重和も戻すこと。
+    #
+    # # Step 4: 反响数预测
+    # inquiry = predict_inquiry(prop_data)
+    # notion_update(page_id, {"予測_反響数": {"number": inquiry}})
+    # log(f"  反響: {inquiry}")
+    #
+    # # Step 5: SUUMO 市场排名
+    # try:
+    #     rank_data = query_market_rank(browser_page, prop_data)
+    #     if rank_data:
+    #         rank_text = f"{rank_data['rank']}/{rank_data['total_properties']} ({rank_data['percentile']}%)"
+    #         notion_update(page_id, {"市場順位": {"rich_text": [{"text": {"content": rank_text}}]}})
+    #         log(f"  市場順位: {rank_text}")
+    #     else:
+    #         notion_update(page_id, {"市場順位": {"rich_text": [{"text": {"content": "err"}}]}})
+    #         log(f"  市場順位: err")
+    # except Exception as e:
+    #     notion_update(page_id, {"市場順位": {"rich_text": [{"text": {"content": "err"}}]}})
+    #     log(f"  市場順位 异常: {str(e)[:80]}")
+    #
+    # # Step 6: SUUMO 广告数
+    # ad_count = None
+    # try:
+    #     ad_count = query_ad_count(browser_page, browser_context, prop_data)
+    #     if ad_count:
+    #         notion_update(page_id, {"広告数": {"number": ad_count}})
+    #         log(f"  広告数: {ad_count}")
+    #     else:
+    #         log(f"  広告数: 未找到")
+    # except Exception as e:
+    #     log(f"  広告数 异常: {str(e)[:80]}")
 
-    # Step 5: SUUMO 市场排名
-    try:
-        rank_data = query_market_rank(browser_page, prop_data)
-        if rank_data:
-            rank_text = f"{rank_data['rank']}/{rank_data['total_properties']} ({rank_data['percentile']}%)"
-            notion_update(page_id, {"市場順位": {"rich_text": [{"text": {"content": rank_text}}]}})
-            log(f"  市場順位: {rank_text}")
-        else:
-            notion_update(page_id, {"市場順位": {"rich_text": [{"text": {"content": "err"}}]}})
-            log(f"  市場順位: err")
-    except Exception as e:
-        notion_update(page_id, {"市場順位": {"rich_text": [{"text": {"content": "err"}}]}})
-        log(f"  市場順位 异常: {str(e)[:80]}")
-
-    # Step 6: SUUMO 广告数
-    ad_count = None
-    try:
-        ad_count = query_ad_count(browser_page, browser_context, prop_data)
-        if ad_count:
-            notion_update(page_id, {"広告数": {"number": ad_count}})
-            log(f"  広告数: {ad_count}")
-        else:
-            log(f"  広告数: 未找到")
-    except Exception as e:
-        log(f"  広告数 异常: {str(e)[:80]}")
-
-    # Step 7: 推薦点数 (含热门駅 / 区 反响効率 加分)
+    # Step 7: 推薦点数 (view + 热门駅 / 区 反响効率 加分)
     station = prop_data.get("station", "")
     ward = prop_data.get("city", "")
     is_hot = bool(station and station.rstrip("駅").strip() in HOT_STATIONS)
     ward_bonus = WARD_REVERB_BONUS.get(ward, 0.0) if not is_hot else 0.0
-    score = calculate_recommendation(view, inquiry, ad_count, station=station, ward=ward)
+    score = calculate_recommendation(view, station=station, ward=ward)
     notion_update(page_id, {"推薦点数": {"number": score}})
     if is_hot:
         log(f"  ⭐ HOT 駅 ({station}) → score +{HOT_STATION_BONUS} → {score}")
@@ -1198,12 +1316,55 @@ def process_property(prop_data, browser_page, browser_context):
 
     # Step 8: 实时写入TOP表 (含高竞争预过滤)
     # 合并后只有 1 张 TOP DB (おすすめ), 用 Status 区分商号已认可 vs 待确认
+    # 推薦点数: score >= RECOMMEND_THRESHOLD で書き込み。
+    # 2026-06-11 撤廃: 旧·上限ゲート (score >= RECOMMEND_UPPER_THRESHOLD で skip) は view-only 化により
+    #   「view が高い=最良物件」を捨てる矛盾になるため削除。過密物件は下の高竞争プレフィルタ
+    #   (_kwd_count_listings + MAX_COMPETITION_FOR_ENTRY) が独立に弾く。
     if score >= RECOMMEND_THRESHOLD:
+        # 2026-06-12: おすすめ DB は 2 階以上の物件のみ。1 階・地下・階不明は TOP 投稿 skip。
+        #   score / 予測_view数 は MAIN DB に記録済み。SUUMO 高竞争プレフィルタより前に弾いて検索も節約。
+        floor = prop_data.get("floor")
+        if floor is None or floor < 2:
+            log(f"  🏠 2 階未満/地下/階不明 (所在階=「{prop_data.get('floor_raw','?')}」) → おすすめ DB 書込 skip (below_2f)")
+            return "below_2f"
+
+        # 2026-06-12: 築「死亡帯」(21-27年≒1999-2005年築) は自動選品から除外 (analysis-claude finding: 359投放0反響)。
+        #   score / 予測_view数 は MAIN DB に記録済み、TOP 投稿のみ skip。SUUMO 検索より前に弾く。
+        built = prop_data.get("built_year")
+        if built:
+            age = datetime.now(JST).year - built
+            if DEAD_ZONE_AGE_MIN <= age <= DEAD_ZONE_AGE_MAX:
+                log(f"  💀 築{age}年 (死亡帯 {DEAD_ZONE_AGE_MIN}-{DEAD_ZONE_AGE_MAX}, {built}年築) → おすすめ DB 書込 skip (dead_zone_age)")
+                return "dead_zone_age"
+        # 派発分割: 管理会社可否(共通) は判定済み。担当会社は「エリア × 枠比」で決める
+        #   15区   = funts/Summit 両方が地理的に可 → SLOT_CAP 比 (50:10) でランダム
+        #   8区+2市 = funts 専用エリア            → funts
+        #   カバー外 = 投稿しない
+        ward = prop_data.get("city", "")
+        in_funts = ward in FUNTS_AREA
+        in_summit = ward in SUMMIT_WARDS
+
         initial_status = None
+        assignee = None
         if ad_status == "可":
-            initial_status = "広告待ち"      # 商号已是 whitelist, 直接进广告队列
+            if not in_funts:
+                log(f"  広告可だがカバー外エリア ({ward or '区不明'}), 跳过写 TOP 表")
+                return "out_of_area"
+            assignee = decide_assignee(in_funts, in_summit)   # 15区→枠比 / 8区+2市→funts
+            initial_status = "広告待ち"
         elif ad_status == "確認待ち":
-            initial_status = "確認待ち"      # 商号未确认, staff 看到后填 会社広告可否, 再改 Status
+            # 確認待ち: エリアで確定できる分だけ即タグ。15区は担当未定 (承認時に決定、後日)
+            if in_summit:
+                assignee = None
+            elif in_funts:
+                assignee = COMPANY_FUNTS
+            else:
+                log(f"  ⚠ カバー外エリア ({ward or '区不明'}), 跳过写 TOP 表")
+                return "out_of_area"
+            initial_status = "確認待ち"
+        else:
+            # 物件による 等 → 投稿しない (従来通り)
+            return "case_skip"
 
         if initial_status:
             # 高竞争预过滤: 用 SUUMO kwd 搜索看已有几家中介公开了此房间
@@ -1224,7 +1385,8 @@ def process_property(prop_data, browser_page, browser_context):
                 "management_company": company
             }
             add_to_top_db(RECOMMEND_DATABASE_ID, "新着物件おすすめ", top_prop,
-                          listing_count=listing_count, status_name=initial_status)
+                          listing_count=listing_count, status_name=initial_status,
+                          assignee=assignee)
 
     return "success"
 
@@ -1282,6 +1444,43 @@ def expire_stale_pending(cutoff):
     n = 0
     for p in pages:
         if notion_update(p["id"], {"Status": {"status": {"name": "時間超過"}}}):
+            n += 1
+    return n
+
+
+def _last_noon_jst(now_jst):
+    """now_jst からみて直近に経過した 12:00 JST を返す。
+    now_jst.hour >= 12 → 今日 12:00、< 12 → 昨日 12:00"""
+    noon_today = now_jst.replace(hour=12, minute=0, second=0, microsecond=0)
+    if now_jst >= noon_today:
+        return noon_today
+    return noon_today - timedelta(days=1)
+
+
+def expire_stale_hold():
+    """前日以前 (直近 12:00 JST より前) に created な 掲載保留 row を
+    【時間超過】掲載保留 にマーク。
+
+    既存 expire_stale_pending と同じパターン、Status と判定境界だけ違う:
+      - 確認待ち は cutoff (4 時間) 単位で時間切れ
+      - 掲載保留 は 12:00 JST (日単位) で時間切れ
+        → 朝の 11:00 cutoff の保留は同日 12:00 過ぎ撤退、それ以降の cutoff は翌日 12:00 過ぎ撤退
+    """
+    threshold = _last_noon_jst(datetime.now(JST))
+    pages = notion_query(
+        RECOMMEND_DATABASE_ID,
+        filter_obj={
+            "and": [
+                {"property": "Status", "status": {"equals": "掲載保留"}},
+                {"timestamp": "created_time", "created_time": {"before": threshold.isoformat()}}
+            ]
+        }
+    )
+    if not pages:
+        return 0
+    n = 0
+    for p in pages:
+        if notion_update(p["id"], {"Status": {"status": {"name": "【時間超過】掲載保留"}}}):
             n += 1
     return n
 
@@ -1367,6 +1566,10 @@ def main():
     expired = expire_stale_pending(current_cutoff)
     if expired:
         log(f"前バッチ確認待ち {expired} 件 → 時間超過")
+    # 前日以前 (12:00 JST 境界) の掲載保留 → 【時間超過】掲載保留
+    expired_hold = expire_stale_hold()
+    if expired_hold:
+        log(f"前日以前の掲載保留 {expired_hold} 件 → 【時間超過】掲載保留")
 
     log("查询未评分物件...")
     pages = fetch_unscored_properties(current_cutoff)
@@ -1385,7 +1588,7 @@ def main():
     enqueued = _fill_queue(work_queue, pages)
     log(f"入队: {enqueued} 个")
 
-    stats = {"success": 0, "low_view": 0, "unallowed": 0, "high_competition": 0, "no_rent": 0, "error": 0}
+    stats = {"success": 0, "low_view": 0, "unallowed": 0, "high_competition": 0, "high_score_skip": 0, "no_rent": 0, "low_rent": 0, "error": 0}
     stop_event = threading.Event()
 
     log(f"\n启动 {WORKER_COUNT} 个并发 Playwright worker (headless, 资源拦截开启)...")
@@ -1418,6 +1621,9 @@ def main():
                 expired = expire_stale_pending(current_cutoff)
                 if expired:
                     log(f">>> 前バッチ確認待ち {expired} 件 → 時間超過")
+                expired_hold = expire_stale_hold()
+                if expired_hold:
+                    log(f">>> 前日以前の掲載保留 {expired_hold} 件 → 【時間超過】掲載保留")
                 pages = fetch_unscored_properties(current_cutoff)
                 added = _fill_queue(work_queue, pages)
                 log(f">>> 新队列: {added} 个")

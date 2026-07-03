@@ -1,21 +1,25 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Watch Registrations - 独立服务 (観測専任、2026-05-07〜)
+Watch Registrations - 独立服务 (2026-05-18 〜 中介数ベース撤退判定 再導入、現閾値 10)
 
-定期扫描推荐 DB (新着物件おすすめ, 2026-04-28 合并后只剩这一张):
-1. 跳过终态(取下済み / 入稿失敗 / 広告掲載禁止) + 已要撤(要取り下げ)
-2. 按 REINS_ID 从 MAIN DB 取得 rent/area (用于过滤 SUUMO 搜索结果)
-3. 用物件名在 SUUMO 上做キーワード搜索, 按 rent±0.5万 & area±2m2 过滤
-4. 过滤后剩下的 cassette 数 = 登録店舗数(一般一家中介一次登録该房间)
-5. 写回「登録店舗数」列。搜不到或出错写 0
+3 DB 跨ぎフロー:
+1. 掲載物件のみ DB (35f1c197..., ADs-Manager が forrent 掲載中物件を upsert) 全件 query
+   → `名称` (title) から prefix 剥がして 12 桁 REINS_ID 抽出 (og 系は skip)
+2. おすすめ DB (3171c197...) 全 row を pre-fetch して dict 化、REINS_ID で lookup
+   → 該当 row なければ skip (書き戻し先なし)
+3. MAIN DB (3031c197...) から REINS_ID で rent/area 取得 (SUUMO 過滤用)
+4. SUUMO kwd 検索 → cassette を rent±0.5万 & area±2m2 で過滤 → 中介数 count
+5. おすすめ DB.登録店舗数 + 掲載物件のみ DB.競合仲介数 に書き戻し + Obsidian Fango Listings ノートに append
+6. 中介数 >= RETIRE_BY_LISTING_COUNT (=13) なら 2 つの DB (おすすめ + 掲載物件のみ) の
+   Status=要取り下げ 自動セット + logs/audit_listing_retired.csv に audit 行追加
 
-**撤退判定はもう持たない**: 2026-05-07 に PV ベース動的撤退モジュール
-  /Users/developer_recika/Fango/PVMonitor/ に完全移管。本ファイルは観測 (登録店舗数の書込) 専任。
+PV ベース撤退 (PVMonitor/retire_by_pv.py) と並列 OR 条件で動作。
+冪等: 終態 (要取り下げ / 取下済み / 入稿失敗 等) は再判定 skip。
 
 该服务与物件评估服务(process_pipeline.py / workflow_trigger.py)完全独立:
   - 独立日志: logs/watch_registrations.log
-  - 独立进程,一次性运行后退出 (launchd/cron 驱动)
+  - 独立进程, 一次性运行后退出 (launchd 驱动)
   - 独立 Playwright 浏览器实例
   - 不依赖模型 / 沿線字典
 
@@ -25,6 +29,7 @@ Watch Registrations - 独立服务 (観測専任、2026-05-07〜)
 import os
 import sys
 import re
+import csv
 import time
 import requests
 from pathlib import Path
@@ -32,29 +37,29 @@ from datetime import datetime
 
 # 固定 cwd 到项目根
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # scripts/ で同階層 module を import 可能に
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 load_dotenv()
 
 from playwright.sync_api import sync_playwright
+from datetime import timezone, timedelta
+
+from obsidian_listings import append_observation
 
 sys.stdout.reconfigure(line_buffering=True)
+
+JST = timezone(timedelta(hours=9))
 
 
 # ============================================================
 # 配置
 # ============================================================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-MAIN_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"       # 全物件 DB
-# 需要扫描的推荐 DB(都有 REINS_ID / 物件名 / Status / 登録店舗数 字段)
-# 每项: (显示名, DB ID, 活跃 Status allowlist)
-# 2026-04-28 合并后只剩 1 张 TOP DB; 旧 確認待ち DB 已废弃
-# active = 全部非终态 + 非已要撤; 终态(取下済み/入稿失敗/広告掲載禁止/要取り下げ)不扫
-TARGET_DATABASES = [
-    ("新着物件おすすめ", "3171c1974dad80439367df13aa67f012",
-        ["確認待ち", "広告待ち", "掲載保留", "掲載指示済み"]),
-]
+MAIN_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"          # 全物件 DB (rent/area 取得元)
+LISTING_ONLY_DB_ID = "35f1c1974dad80ccb54fe17cfd116328"            # 掲載物件のみ (ADs-Manager が upsert、source)
+OSUSUME_DB_ID = "3171c1974dad80439367df13aa67f012"                 # おすすめ DB (lookup 元 + 登録店舗数 書き戻し先)
 
 SUUMO_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=040&ta=13"
 
@@ -62,11 +67,16 @@ SUUMO_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=04
 RENT_TOL_MAN = 0.5     # 万円
 AREA_TOL_M2 = 2.0      # m2
 
-# 撤退判定は 2026-05-07 に PVMonitor へ完全移管 (/Users/developer_recika/Fango/PVMonitor/scripts/retire_by_pv.py)
-# 旧 RETIRE_BY_AGE_DAYS / RETIRE_BY_LISTING_COUNT 定数と判定ブロックは削除済み。
-# 本ファイルは観測 (登録店舗数の書込) 専任。
+# 中介数ベース自動撤退 (2026-05-18 再導入、旧 RETIRE_BY_LISTING_COUNT=10 から 30 に引き上げ)
+# PV ベース撤退 (PVMonitor/retire_by_pv.py) と並列 OR 条件。
+RETIRE_BY_LISTING_COUNT = 13   # SUUMO 上の中介数 >= 此值 → Status=要取り下げ 自動セット (2026-07-03: 15→13 引き下げ)
+RETIRE_DRY_RUN = os.getenv("RETIRE_DRY_RUN", "0") == "1"   # 1 なら撤退時 Notion 書込 skip、log と audit CSV のみ
+
+# 撤退対象外 Status (終態 + 既に要取り下げ済み)
+_RETIRE_SKIP_STATUSES = {"要取り下げ", "取下済み", "入稿失敗", "広告掲載禁止", "時間超過", "【時間超過】掲載保留"}
 
 LOG_FILE = Path("logs") / "watch_registrations.log"
+AUDIT_CSV = Path("logs") / "audit_listing_retired.csv"
 LOG_FILE.parent.mkdir(exist_ok=True)
 
 notion_headers = {
@@ -179,6 +189,11 @@ def normalize_building_name(name):
     name = re.sub(r"\([^)]*\)", "", name)
     # 去尾部的「XXX号室」(全/半角数字和漢数字)
     name = re.sub(r"[\s　]?[\dO〇零一二三四五六七八九十百千０-９]+\s*号\s*室\s*$", "", name)
+    # 末尾の棟番号除去 (2026-06-15: SUUMO 検索で「Ⅱ」等が付くと 0 件→競合見逃しになるバグ修正。
+    #   別棟が混ざっても後段の rent/area フィルタで同部屋に収束する)
+    name = re.sub(r"[\s　]?[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫⅰⅱⅲⅳⅴ]+\s*$", "", name)               # Unicodeローマ数字棟
+    name = re.sub(r"[\s　]?[A-ZＡ-Ｚ0-9０-９一二三四五六七八九]\s*号?棟\s*$", "", name)     # A棟 / 2号棟 等
+    name = re.sub(r"[\s　](?:VIII|VII|VI|IV|IX|III|II|V|X)\s*$", "", name)                 # ラテンローマ数字棟
     # 多余空格压缩(保留至少一个 半角空格, 复数空格 → 单个)
     name = re.sub(r"[\s　]{2,}", " ", name)
     return name.strip()
@@ -276,11 +291,67 @@ def count_suumo_listings(page, building_name, target_rent_man, target_area_sqm):
 # ============================================================
 # Main
 # ============================================================
+def _append_audit(reins_id, page_id, name, timestamp, count, status_before, status_after):
+    """撤退実行を logs/audit_listing_retired.csv に 1 行 append (新規ファイル時はヘッダも書く)."""
+    is_new = not AUDIT_CSV.exists()
+    with open(AUDIT_CSV, "a", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        if is_new:
+            w.writerow(["timestamp", "reins_id", "page_id", "building_name",
+                        "listing_count", "status_before", "status_after", "reason"])
+        w.writerow([timestamp, reins_id, page_id, name, count, status_before,
+                    status_after, f"listing_count>={RETIRE_BY_LISTING_COUNT}"])
+
+
+def mark_for_retirement_by_listing(item, count):
+    """中介数 >= RETIRE_BY_LISTING_COUNT で 2 つの DB (おすすめ + 掲載物件のみ) の Status=要取り下げ にセット.
+
+    冪等: おすすめ DB 側の現 Status が終態/要取り下げ なら何もしない (False 返却).
+    掲載物件のみ DB 側は おすすめ と同時に更新するため、独立判定はしない.
+    env RETIRE_DRY_RUN=1 で Notion 書込 skip、audit CSV のみ.
+    """
+    current_status = item.get("status", "")
+    if current_status in _RETIRE_SKIP_STATUSES:
+        return False
+
+    reins_id = item["reins_id"]
+    osusume_page_id = item["page_id"]
+    listing_only_page_id = item.get("listing_only_page_id")
+    name = item.get("building_name", "")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    log(f"  🚨 中介数 {count} >= {RETIRE_BY_LISTING_COUNT} → Status=要取り下げ にセット (REINS_ID={reins_id})")
+
+    if RETIRE_DRY_RUN:
+        log(f"    [DRY-RUN] Notion 両 DB 書込 skip")
+        _append_audit(reins_id, osusume_page_id, name, ts, count, current_status, "要取り下げ (dry-run)")
+        return True
+
+    retire_props = {"Status": {"status": {"name": "要取り下げ"}}}
+
+    ok_osusume = notion_update(osusume_page_id, retire_props)
+    if not ok_osusume:
+        log(f"    ⚠ おすすめ DB Notion update 失敗")
+        return False
+    log(f"    ✓ おすすめ DB Status=要取り下げ")
+
+    if listing_only_page_id:
+        ok_listing = notion_update(listing_only_page_id, retire_props)
+        if not ok_listing:
+            log(f"    ⚠ 掲載物件のみ DB Notion update 失敗 (おすすめ DB は成功済)")
+        else:
+            log(f"    ✓ 掲載物件のみ DB Status=要取り下げ")
+
+    _append_audit(reins_id, osusume_page_id, name, ts, count, current_status, "要取り下げ")
+    return True
+
+
 def process_one(item, browser_page):
     reins_id = item["reins_id"]
     page_id = item["page_id"]
     name = item["building_name"]
     koukai_date = item.get("koukai_date", "")
+    status = item.get("status", "")
 
     # 拉物件详情用于 SUUMO 搜索
     details = fetch_property_details(reins_id)
@@ -299,6 +370,36 @@ def process_one(item, browser_page):
     ok = notion_update(page_id, update_props)
     if not ok:
         return "update_failed"
+
+    # 掲載物件のみ DB の「競合仲介数」にも同値を書き戻し (列名 別、書込み失敗は警告のみ続行)
+    listing_only_page_id = item.get("listing_only_page_id")
+    if listing_only_page_id:
+        ok_listing = notion_update(listing_only_page_id, {"競合仲介数": {"number": value}})
+        if not ok_listing:
+            log(f"    ⚠ 掲載物件のみ DB.競合仲介数 書込み失敗 (おすすめ DB は成功)")
+
+    # Obsidian 物件ノートに時系列 append (count is None = SUUMO エラーは skip、value=0 は記録)
+    if count is not None:
+        try:
+            ts = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
+            append_observation(
+                reins_id=reins_id,
+                property_name=name,
+                koukai_date=koukai_date,
+                timestamp=ts,
+                count=value,
+                status=status,
+            )
+        except Exception as e:
+            log(f"    Obsidian append 失敗: {str(e)[:120]}")
+
+    # 中介数ベース自動撤退 (count is None なら skip、value < 閾値 なら skip)
+    if count is not None and value >= RETIRE_BY_LISTING_COUNT:
+        try:
+            mark_for_retirement_by_listing(item, value)
+        except Exception as e:
+            log(f"    撤退判定例外: {str(e)[:120]}")
+
     if value > 0:
         log(f"  → 登録店舗数: {value}")
         return "success"
@@ -306,45 +407,94 @@ def process_one(item, browser_page):
     return "not_found"
 
 
-def collect_items(db_label, db_id, active_statuses):
-    """
-    从一个推荐 DB 取出活跃 row, 附带来源 DB 名称、公開日時(用于年龄判定)。
-    active_statuses: 要保留的 Status 名称列表 (allowlist)。空列表会拉全表 (兼容用, 不建议)。
-    """
-    log(f"查询 {db_label} ({db_id})...")
-    filter_obj = None
-    if active_statuses:
-        # 多个 status 用 or 串联: Status 等于其中任一
-        conds = [{"property": "Status", "status": {"equals": s}} for s in active_statuses]
-        filter_obj = {"or": conds} if len(conds) > 1 else conds[0]
-    pages = notion_query(db_id, filter_obj=filter_obj)
-    items = []
+# 掲載物件のみ DB の `名称` (title) prefix 規則 (sync_outcomes.py:156 と同じ)
+#   AI100138178064 / fng100138625774 → 前置を剥がせば REINS_ID
+#   og844 / og50 → ad-system 独自 ID (REINS なし、照合不可なので skip)
+_REINS_PREFIX_RE = re.compile(r"^(AI|fng)(\d{12})$")
+
+
+def extract_reins_id(name):
+    """`名称` (title) から 12 桁 REINS_ID を取り出す。og 系などは None."""
+    if not name:
+        return None
+    m = _REINS_PREFIX_RE.match(name.strip())
+    return m.group(2) if m else None
+
+
+def build_osusume_lookup():
+    """おすすめ DB 全 row を {reins_id: {page_id, building_name, koukai_date, status}} で返す。
+    O(N) 1 回の query で済ませる。終態 Status を含む全行を返却 (filter は呼出し側で判断)。"""
+    pages = notion_query(OSUSUME_DB_ID)
+    lookup = {}
     for p in pages:
         props = p["properties"]
         reins_id = ""
         if props.get("REINS_ID", {}).get("title"):
             reins_id = props["REINS_ID"]["title"][0]["plain_text"]
+        if not reins_id:
+            continue
         name = ""
         if props.get("物件名", {}).get("rich_text"):
             name = props["物件名"]["rich_text"][0]["plain_text"]
-        # 公開日時: 用于年龄判定。pipeline 写入时设为当日, ad-script 投放时也可能更新
         koukai = ""
-        koukai_obj = props.get("公開日時", {}).get("date")
-        if koukai_obj:
-            koukai = koukai_obj.get("start", "")
-        # 兜底: 如果没有 公開日時, 用 created_time
+        ko = props.get("公開日時", {}).get("date")
+        if ko:
+            koukai = ko.get("start", "")[:10]
         if not koukai:
-            koukai = p.get("created_time", "")[:10]   # 取 YYYY-MM-DD
-        if reins_id and name:
-            items.append({
-                "page_id": p["id"],
-                "reins_id": reins_id,
-                "building_name": name,
-                "source_db": db_label,
-                "koukai_date": koukai,   # YYYY-MM-DD
-            })
-    suffix = f" (Status ∈ {'/'.join(active_statuses)})" if active_statuses else " (全表)"
-    log(f"  → {len(items)} 件{suffix}")
+            koukai = p.get("created_time", "")[:10]
+        status_val = ""
+        so = props.get("Status", {}).get("status")
+        if so:
+            status_val = so.get("name", "")
+        lookup[reins_id] = {
+            "page_id": p["id"],
+            "building_name": name,
+            "koukai_date": koukai,
+            "status": status_val,
+        }
+    return lookup
+
+
+def collect_from_listing_only_db():
+    """掲載物件のみ DB 全件 → REINS_ID 抽出 → おすすめ DB で lookup → item dict 配列を返す。"""
+    log(f"查询 掲載物件のみ ({LISTING_ONLY_DB_ID})...")
+    pages = notion_query(LISTING_ONLY_DB_ID)
+    log(f"  → {len(pages)} 件 (全件)")
+
+    log(f"事前 lookup: おすすめ DB ({OSUSUME_DB_ID}) 全 row 取得...")
+    lookup = build_osusume_lookup()
+    log(f"  → {len(lookup)} 個 REINS_ID をキャッシュ")
+
+    items = []
+    stat = {"non_reins": 0, "no_osusume_row": 0, "ok": 0}
+    for p in pages:
+        title = p["properties"].get("名称", {}).get("title", [])
+        name_raw = "".join(t.get("plain_text", "") for t in title).strip()
+        reins_id = extract_reins_id(name_raw)
+        if not reins_id:
+            stat["non_reins"] += 1
+            continue
+        osusume = lookup.get(reins_id)
+        if not osusume:
+            stat["no_osusume_row"] += 1
+            continue
+        # Status は 掲載物件のみ DB 側を一手データとして採用 (ADs-Manager が forrent 最新状況を反映、
+        # おすすめ DB 側の Status はズレてる場合がある。例: ad-script 再試行成功後の「入稿失敗」残置)
+        listing_status_obj = p["properties"].get("Status", {}).get("status")
+        listing_status = listing_status_obj.get("name", "") if listing_status_obj else ""
+        items.append({
+            "page_id": osusume["page_id"],            # おすすめ DB 側 (登録店舗数 書戻 + Status 更新先)
+            "listing_only_page_id": p["id"],          # 掲載物件のみ DB 側 (Status 更新先)
+            "reins_id": reins_id,
+            "building_name": osusume["building_name"],
+            "source_db": "掲載物件のみ",
+            "koukai_date": osusume["koukai_date"],
+            "status": listing_status,                 # 掲載物件のみ DB 側を一手データ採用
+            "osusume_status": osusume["status"],      # 参考用 (audit ログには載らないが debug 用)
+        })
+        stat["ok"] += 1
+
+    log(f"  処理対象: {stat['ok']} 件 (og 系 skip {stat['non_reins']}, おすすめ未登録 skip {stat['no_osusume_row']})")
     return items
 
 
@@ -353,10 +503,8 @@ def main():
     log("Watch Registrations — 独立服务")
     log("=" * 60)
 
-    # 从多个推荐 DB 收集活跃物件
-    all_items = []
-    for db_label, db_id, active_statuses in TARGET_DATABASES:
-        all_items.extend(collect_items(db_label, db_id, active_statuses))
+    # 掲載物件のみ DB ベース (3 DB 跨ぎ)
+    all_items = collect_from_listing_only_db()
 
     log(f"\n合计待处理: {len(all_items)} 件")
 
