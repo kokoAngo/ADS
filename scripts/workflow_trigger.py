@@ -20,6 +20,11 @@ from watchdog.events import FileSystemEventHandler
 # 从项目根的 .env 读取 NOTION_API_KEY 等
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+# MAIN DB(新着物件)已迁 PostgreSQL；轮询新物件改查 PG。
+# 必须在 load_dotenv 之后 import：pg_main 导入时读 FANGO_MAIN_DSN。
+sys.path.insert(0, str(Path(__file__).parent))
+import pg_main
+
 # 阻止系统睡眠: Windows 用 SetThreadExecutionState, macOS 用 caffeinate
 if sys.platform == 'win32':
     import ctypes
@@ -90,37 +95,15 @@ def check_bridge_inbox():
         logger.debug(f"Bridge inbox チェック失敗 (無視): {e}")
 
 
-def check_notion_for_new_properties():
-    """检查Notion是否有当前 session 内新物件需要评估（予測_view数为空 且 创建时间 > 当前截止时间）"""
+def check_pg_for_new_properties():
+    """检查 PG(main.shinchaku_bukken)是否有当前 session 内新物件需要评估
+    （predicted_view IS NULL 且 created_time > 当前截止时间）。
+    2026-07 MAIN DB 迁 PG 后，新物件不再进 Notion 3031，故轮询改查 PG。"""
     try:
-        headers = {
-            "Authorization": f"Bearer {NOTION_API_KEY}",
-            "Content-Type": "application/json",
-            "Notion-Version": "2022-06-28"
-        }
-        url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
         cutoff = get_most_recent_cutoff()
-        payload = {
-            "page_size": 1,  # 只需要知道是否有，不需要全部数据
-            "filter": {
-                "and": [
-                    {"property": "予測_view数", "number": {"is_empty": True}},
-                    {"timestamp": "created_time", "created_time": {"after": cutoff.isoformat()}}
-                ]
-            }
-        }
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            count = len(data.get("results", []))
-            has_more = data.get("has_more", False)
-            # 如果有结果或has_more为True，说明有新物件
-            return count > 0 or has_more
-        else:
-            logger.warning(f"Notion API请求失败: {response.status_code}")
-            return False
+        return pg_main.has_unscored(cutoff)
     except Exception as e:
-        logger.warning(f"检查Notion失败: {e}")
+        logger.warning(f"检查PG新物件失败: {e}")
         return False
 
 
@@ -261,7 +244,7 @@ def main():
 
     logger.info("开始监控... (按Ctrl+C停止)")
     logger.info(f"触发方式1: 修改或更新 {TRIGGER_FILE}")
-    logger.info(f"触发方式2: 每 {POLL_INTERVAL // 60} 分钟自动检查Notion新物件")
+    logger.info(f"触发方式2: 每 {POLL_INTERVAL // 60} 分钟自动检查PG新物件")
     logger.info(f"触发方式3: 截止时刻(JST {','.join(f'{h}:{CUTOFF_MINUTE:02d}' for h in CUTOFF_HOURS)})到达时立即触发")
 
     # 睡眠检测参数
@@ -290,11 +273,11 @@ def main():
                 event_handler._handle_trigger()
                 last_poll_time = current_time
 
-            # Notion轮询：定期检查是否有新物件
+            # PG轮询：定期检查是否有新物件
             poll_gap = current_time - last_poll_time
             if poll_gap >= POLL_INTERVAL and not event_handler.is_running:
-                logger.info("定时检查Notion新物件...")
-                if check_notion_for_new_properties():
+                logger.info("定时检查PG新物件...")
+                if check_pg_for_new_properties():
                     logger.info("发现新物件，触发Workflow")
                     event_handler._handle_trigger()
                 else:

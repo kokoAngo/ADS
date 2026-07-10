@@ -45,6 +45,15 @@ def fetch_unscored(cutoff):
         return cur.fetchall()
 
 
+def has_unscored(cutoff) -> bool:
+    """当前 cutoff 之后是否还有未评分行 (轻量 EXISTS, 供 workflow_trigger 轮询用, 不拉全行)。"""
+    sql = ("SELECT EXISTS(SELECT 1 FROM main.shinchaku_bukken "
+           "WHERE predicted_view IS NULL AND created_time > %s)")
+    with _conn().cursor() as cur:
+        cur.execute(sql, (cutoff,))
+        return bool(cur.fetchone()[0])
+
+
 def _scalar(prop: dict):
     """从 notion_update 格式的属性 dict 取标量值。"""
     if "number" in prop:
