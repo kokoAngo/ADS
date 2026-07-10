@@ -368,22 +368,22 @@ def _parse_floor(text):
     return int(m.group()) if m else None
 
 
-def extract_property(page):
-    """从Notion页面提取物件全部数据"""
-    props = page["properties"]
-    data = {"page_id": page["id"]}
+def extract_property(row):
+    """从 PG 行 (main.shinchaku_bukken) 提取物件数据。
+    列里存的就是 Notion 原始字符串, 解析逻辑与旧版完全一致, 只是取值改自 PG 列。
+    page_id 用 PG 自增 id (回写时 update_main 按 id)。"""
+    data = {"page_id": row["id"]}
 
-    def get_text(field):
-        if field in props and props[field].get("rich_text"):
-            return props[field]["rich_text"][0]["plain_text"]
-        return ""
+    def get_text(col):
+        v = row.get(col)
+        return "" if v is None else str(v)
 
     # REINS_ID
-    if "REINS_ID" in props and props["REINS_ID"].get("title"):
-        data["bukken_number"] = props["REINS_ID"]["title"][0]["plain_text"]
+    if row.get("reins_id"):
+        data["bukken_number"] = row["reins_id"]
 
     # 賃料（万円→円）
-    rent_text = get_text("賃料（万円）")
+    rent_text = get_text("rent_man")
     if rent_text:
         try:
             data["rent"] = int(float(rent_text) * 10000)
@@ -391,7 +391,7 @@ def extract_property(page):
             pass
 
     # 面積
-    area_text = get_text("使用部分面積（m2）")
+    area_text = get_text("area_sqm")
     if area_text:
         try:
             data["area_sqm"] = float(area_text)
@@ -399,7 +399,7 @@ def extract_property(page):
             pass
 
     # 築年月
-    chiku = get_text("築年月")
+    chiku = get_text("built_ym")
     if chiku and len(chiku) >= 4:
         try:
             data["built_year"] = int(chiku[:4])
@@ -407,7 +407,7 @@ def extract_property(page):
             pass
 
     # 徒歩
-    walk = get_text("徒歩(分)")
+    walk = get_text("walk_min")
     if walk:
         try:
             data["walk_minutes"] = int(float(walk))
@@ -415,12 +415,12 @@ def extract_property(page):
             pass
 
     # 間取
-    madori = get_text("間取")
+    madori = get_text("layout")
     if madori:
         data["floor_plan"] = madori
 
     # 所在地 → 区 / 市 (23区 + 武蔵野/三鷹)
-    address = get_text("所在地")
+    address = get_text("address")
     if address:
         data["address"] = address
         for ward in COVERAGE_DETECT:
@@ -429,13 +429,13 @@ def extract_property(page):
                 break
 
     # 物件種目
-    shubetsu = get_text("物件種目")
+    shubetsu = get_text("property_type")
     if shubetsu:
         data["property_type"] = shubetsu
 
     # 管理費 + 共益費
     mgmt = 0
-    for f in ["管理費（円）", "共益費（円）"]:
+    for f in ["kanrihi", "kyoekihi"]:
         t = get_text(f)
         if t:
             try:
@@ -446,18 +446,18 @@ def extract_property(page):
         data["management_fee"] = mgmt
 
     # 敷金/礼金
-    if get_text("敷金/保証金"):
-        data["deposit"] = parse_months(get_text("敷金/保証金"))
-    if get_text("礼金/権利金"):
-        data["key_money"] = parse_months(get_text("礼金/権利金"))
+    if get_text("deposit_hosho"):
+        data["deposit"] = parse_months(get_text("deposit_hosho"))
+    if get_text("reikin_kenri"):
+        data["key_money"] = parse_months(get_text("reikin_kenri"))
 
     # 商号 (管理公司)
-    company = get_text("商号")
+    company = get_text("mgmt_company")
     if company:
         data["management_company"] = company
 
     # 沿線駅
-    ensen = get_text("沿線駅")
+    ensen = get_text("line_station")
     if ensen:
         parts = re.split(r'[\s　]+', ensen, maxsplit=1)
         if len(parts) >= 2:
@@ -465,12 +465,12 @@ def extract_property(page):
             data["station"] = parts[1]
 
     # 建物名
-    building = get_text("建物名")
+    building = get_text("building_name")
     if building:
         data["building_name"] = building
 
     # 所在階 (REINS は「2」「2階」「B1」「地下1階」等 表記混在)。floor=地上階数(int)、地下/不明は None
-    floor_text = get_text("所在階")
+    floor_text = get_text("floor")
     if floor_text:
         data["floor_raw"] = floor_text.strip()
         data["floor"] = _parse_floor(floor_text)

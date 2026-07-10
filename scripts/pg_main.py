@@ -9,6 +9,7 @@ PostgreSQL main.shinchaku_bukken。おすすめ/管理会社判定 等其他 Not
 from __future__ import annotations
 import os, threading
 import psycopg
+from psycopg.rows import dict_row
 
 DSN = os.getenv("FANGO_MAIN_DSN", "dbname=fango")
 
@@ -34,13 +35,14 @@ def _conn():
 
 def fetch_unscored(cutoff):
     """未评分(predicted_view IS NULL) 且 created_time > cutoff 的行, 最新优先。
-    返回每行的 raw (= 完整原始 Notion page 结构), extract_property 可直接用。"""
-    sql = ("SELECT raw FROM main.shinchaku_bukken "
+    返回 typed 行 dict (含 id + 各列), extract_property 从列取值。
+    迁移行和写入方写的新行都能处理 (typed 列两者都填)。"""
+    sql = ("SELECT * FROM main.shinchaku_bukken "
            "WHERE predicted_view IS NULL AND created_time > %s "
            "ORDER BY created_time DESC")
-    with _conn().cursor() as cur:
+    with _conn().cursor(row_factory=dict_row) as cur:
         cur.execute(sql, (cutoff,))
-        return [row[0] for row in cur.fetchall()]
+        return cur.fetchall()
 
 
 def _scalar(prop: dict):
@@ -56,8 +58,9 @@ def _scalar(prop: dict):
     return None
 
 
-def update_main(page_id: str, props: dict):
-    """把 notion_update 同格式的 props 翻译成 PG 列更新 (只更新 _MAP 内的评分列)。"""
+def update_main(row_id, props: dict):
+    """把 notion_update 同格式的 props 翻译成 PG 列更新 (只更新 _MAP 内的评分列)。
+    row_id = 行的自增 id (来自 extract_property 设的 data['page_id'])。"""
     sets, vals = [], []
     for name, prop in props.items():
         m = _MAP.get(name)
@@ -67,7 +70,7 @@ def update_main(page_id: str, props: dict):
         vals.append(_scalar(prop))
     if not sets:
         return
-    vals.append(page_id)
-    sql = f"UPDATE main.shinchaku_bukken SET {', '.join(sets)} WHERE notion_page_id = %s"
+    vals.append(row_id)
+    sql = f"UPDATE main.shinchaku_bukken SET {', '.join(sets)} WHERE id = %s"
     with _conn().cursor() as cur:
         cur.execute(sql, vals)
