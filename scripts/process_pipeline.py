@@ -38,6 +38,11 @@ RECOMMEND_DATABASE_ID = "3171c1974dad80439367df13aa67f012"  # 新着物件おす
 COMPANY_JUDGMENT_DB_ID = os.getenv("COMPANY_JUDGMENT_DB_ID")  # 管理会社判定 DB (会社単位、未設定時は relation スキップ)
 # 注: 旧 PENDING_DATABASE_ID (3181...) 已废弃, 122 行迁到 おすすめ DB
 
+# --- MAIN DB(新着物件) 已迁到 PostgreSQL: 读/写评分走 pg_main, 不再经 Notion 3031。
+#     おすすめ(3171)/管理会社判定 等其他表仍走 Notion。 ---
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pg_main
+
 # 截止时间（JST）— 每天 11:00, 15:00, 19:00, 23:00 是新物件登载截止时间
 # 流水线只评估"最近一次截止时间之后"创建的物件
 JST = timezone(timedelta(hours=9))
@@ -1240,12 +1245,12 @@ def process_property(prop_data, browser_page, browser_context):
     step1_props = {"予測_view数": {"number": view}}
     if _CURRENT_CUTOFF is not None:
         step1_props["評価バッチ"] = {"date": {"start": _CURRENT_CUTOFF.isoformat()}}
-    notion_update(page_id, step1_props)
+    pg_main.update_main(page_id, step1_props)
     log(f"  view: {view} | ¥{prop_data['rent']:,} {prop_data.get('area_sqm','?')}㎡ {prop_data.get('city','')} {prop_data.get('floor_plan','')}")
 
     # Step 2: 低分跳过
     if view < VIEW_THRESHOLD:
-        notion_update(page_id, {
+        pg_main.update_main(page_id, {
             "広告可": {"select": {"name": "--"}},
             "市場順位": {"rich_text": [{"text": {"content": "--"}}]}
         })
@@ -1254,12 +1259,12 @@ def process_property(prop_data, browser_page, browser_context):
     # Step 3: 管理公司检查 (会社共通の可否)
     company = prop_data.get("management_company", "")
     ad_status = check_management(company)
-    notion_update(page_id, {"広告可": {"select": {"name": ad_status}}})
+    pg_main.update_main(page_id, {"広告可": {"select": {"name": ad_status}}})
     log(f"  広告可: {ad_status} ({company[:30]})")
 
     # 不可（仲介）: 永不进 TOP 表,跳过后续 SUUMO 抓取
     if ad_status == "不可（仲介）":
-        notion_update(page_id, {"市場順位": {"rich_text": [{"text": {"content": "--"}}]}})
+        pg_main.update_main(page_id, {"市場順位": {"rich_text": [{"text": {"content": "--"}}]}})
         return "unallowed"
 
     # 2026-06-11 暫時停用: 推薦点数を view+加点のみに変更したため、Step 4/5/6 (予測反響数 /
@@ -1305,7 +1310,7 @@ def process_property(prop_data, browser_page, browser_context):
     is_hot = bool(station and station.rstrip("駅").strip() in HOT_STATIONS)
     ward_bonus = WARD_REVERB_BONUS.get(ward, 0.0) if not is_hot else 0.0
     score = calculate_recommendation(view, station=station, ward=ward)
-    notion_update(page_id, {"推薦点数": {"number": score}})
+    pg_main.update_main(page_id, {"推薦点数": {"number": score}})
     if is_hot:
         log(f"  ⭐ HOT 駅 ({station}) → score +{HOT_STATION_BONUS} → {score}")
     elif ward_bonus != 0.0:
@@ -1410,17 +1415,9 @@ def get_current_cutoff():
 
 
 def fetch_unscored_properties(cutoff):
-    """从 Notion 获取指定截止时间之后未评分的物件（最新的优先）"""
-    return notion_query(
-        DATABASE_ID,
-        filter_obj={
-            "and": [
-                {"property": "予測_view数", "number": {"is_empty": True}},
-                {"timestamp": "created_time", "created_time": {"after": cutoff.isoformat()}}
-            ]
-        },
-        sorts=[{"timestamp": "created_time", "direction": "descending"}]
-    )
+    """未评分(予測_view数为空) 且 created_time > cutoff 的物件, 最新优先。
+    已迁到 PostgreSQL main.shinchaku_bukken (返回 raw = 原始 Notion 页结构)。"""
+    return pg_main.fetch_unscored(cutoff)
 
 
 def expire_stale_pending(cutoff):
