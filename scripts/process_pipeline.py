@@ -54,7 +54,7 @@ _CURRENT_CUTOFF = None
 
 # 阈值
 VIEW_THRESHOLD = 3.0           # view < 此值跳过后续步骤 (2026-06-11: 6.0→3.0 引き下げ、view-only 化で評価コスト激減のため新着を広く拾う。価格 6万 / 不可仲介 skip は維持)
-RECOMMEND_THRESHOLD = 5.0       # 推薦点数 下限 (>= 此值才写入TOP表)
+RECOMMEND_THRESHOLD = 6.0       # 推薦点数 下限 (>= 此值才写入TOP表)。2026-07-14: 5.0→6.0 (outcomes 3ヶ月分析: 5-6帯は反響あり率0.9% vs 6+帯1.6%、供給は閾値6.0でも146件/日で枠を圧倒的に上回る)
 RECOMMEND_UPPER_THRESHOLD = 7.0 # [DEPRECATED 2026-06-11] 旧·上限ゲート. view-only 化で撤廃 (高 view=最良物件を捨てる矛盾のため). 定数は互換で残置・未使用
 MAX_COMPETITION_FOR_ENTRY = 5  # SUUMO 上已被 > 此值家中介公开的物件 → 不写入 TOP 表(高竞争跳过)
 MIN_RENT_YEN = 60000           # 賃料 < 此値 → 評価せず skip (2026-06-11 追加、低額帯は反響薄く ROI 低い)
@@ -74,34 +74,66 @@ WEIGHTS = {
     'market_rank': 0.20,
 }
 
-# 热门駅(反响/千供給 50-368, 平均的 10-60 倍)— findings/stations_costs.md Top 20
+# 热门駅 — 2026-07-14 再キャリブ (outcomes_history.csv 04-07〜07-13, 4136投放/90反響あり):
+#   採用基準: n>=5 & hits>=2 & rate > 2×GLOBAL(2.2%)、または旧 HOT で hits>=1 かつ rate 良好
+#   除外: 旧 HOT のうち n>=9 で 0 hit (桜新町0/45, 若林0/27, 上北沢0/20, 大井町, 西大井,
+#         世田谷代田, 緑が丘) + 証拠不足 (雑司が谷/尾久/東十条/湯島/千石/四谷三丁目)
+#   旧リスト (供給側分析 findings/stations_costs.md 由来) は git 履歴参照
 HOT_STATIONS = {
-    '世田谷代田', '緑が丘', '千石', '若林', '京成小岩',
-    '雑司が谷', '東大前', '上北沢', '尾久', '千住大橋',
-    '自由が丘', '桜新町', '湯島', '大井町', '新中野',
-    '尾山台', '西大井', '不動前', '東十条', '四谷三丁目',
+    '豪徳寺',       # 3/13 hits, 反響計30
+    '中野新橋',     # 4/37, 反響計22
+    '高円寺',       # 3/31
+    '中野',         # 3/33
+    '梅ヶ丘',       # 2/13
+    '大山',         # 2/17
+    '経堂',         # 2/27
+    '代田橋',       # 2/33
+    '葛西',         # 2/36
+    '西新宿五丁目', # 2/43
+    '不動前',       # 2/18 (旧HOT 継続)
+    '新中野',       # 2/28 (旧HOT 継続)
+    '京成小岩',     # 1/11, 反響計6 (旧HOT 継続)
+    '東大前',       # 1/6 (旧HOT 継続)
+    '自由が丘',     # 1/9 (旧HOT 継続)
+    '千住大橋',     # 1/4 (旧HOT 継続)
+    '尾山台',       # 1/17 (旧HOT 継続)
 }
 HOT_STATION_BONUS = 0.3   # 物件最寄駅 ∈ HOT_STATIONS → 推薦点数 +0.3
 
-# 区别反响効率 bonus (analysis-claude 提案 2026-04-30, 保守版 ±0.3 圧縮)
-# 2026-04-30 更新: ±0.3 暂定版 → shrinkage 精算版 (analysis-claude finding 3521c197-4dad-81d6-...)
+# 区别反响効率 bonus (analysis-claude 提案 2026-04-30, shrinkage 公式は当時のまま)
 # 公式: ward_smoothed = (n*rate + K*GLOBAL) / (n + K), bonus = clip(delta * SCALE, ±CLIP)
-# パラメータ: K=10 prior 重み / GLOBAL_RATE=0.16 / SCALE=1.5 / CLIP=±0.5 / N_MIN=5
-# 効果: 极端値缓和 (大田 -0.3→-0.13, 葛飾 -0.3→-0.09), 文京単独強化 (+0.3→+0.43)
+# 2026-07-14 再キャリブ (outcomes_history.csv 04-07〜07-13, 4136投放 / GLOBAL_RATE=0.022):
+#   パラメータ: K=10 / GLOBAL_RATE=0.022 / SCALE=11 (旧1.5×0.16/0.022, bonus レンジ維持) / CLIP=±0.5 / N_MIN=5
+#   主な変動: 文京 +0.43→-0.04 (旧値は n=7 時代の過大評価、現 n=56 で平均以下)、
+#             新宿/杉並 正→負、豊島/目黒/渋谷/台東が新リーダー、中野は正を維持 (n=313 で頑健)
+#   分析スクリプト: scratchpad recalib_analysis.py (使い捨て)、次回再キャリブは 2026-10 頃
 # HOT_STATIONS と二重カウント回避: HOT_STATIONS 適用時は ward bonus skip
-# 3 ヶ月毎に再キャリブ予定 (next: 5/20 頃, 投放分布変化を観察してから)
 WARD_REVERB_BONUS = {
-    '文京区':   +0.43,  # n=7, rate 86% → smoothed 45%, +強化
-    '板橋区':   +0.16,  # n=15, rate 33%
-    '中野区':   +0.13,  # n=21, rate 29%
-    '新宿区':   +0.12,  # n=26, rate 27%
-    '杉並区':   +0.12,  # n=9, rate 33%
-    '品川区':   -0.03,  # n=9 軽い負
-    '江戸川区': -0.03,  # n=16 軽い負
-    '世田谷区': -0.07,  # n=142 強い証拠で軽い負
-    '葛飾区':   -0.09,  # n=6, rate 0%
-    '江東区':   -0.11,  # n=8, rate 0%
-    '大田区':   -0.13,  # n=40, rate 5%
+    '豊島区':   +0.49,  # n=69, hits=5, rate 7.2%
+    '台東区':   +0.32,  # n=34, hits=2, rate 5.9%
+    '武蔵野市': +0.30,  # n=15, hits=1, rate 6.7%
+    '渋谷区':   +0.29,  # n=77, hits=4, rate 5.2%
+    '目黒区':   +0.24,  # n=110, hits=5, rate 4.5%
+    '中野区':   +0.21,  # n=313, hits=13, rate 4.2%
+    '葛飾区':   +0.19,  # n=21, hits=1, rate 4.8%
+    '板橋区':   +0.10,  # n=189, hits=6, rate 3.2%
+    '江戸川区': +0.08,  # n=207, hits=6, rate 2.9%
+    '練馬区':   +0.03,  # n=39, hits=1, rate 2.6%
+    '世田谷区': -0.03,  # n=945, hits=18, rate 1.9%
+    '杉並区':   -0.03,  # n=318, hits=6, rate 1.9%
+    '文京区':   -0.04,  # n=56, hits=1, rate 1.8%
+    '新宿区':   -0.05,  # n=577, hits=10, rate 1.7%
+    '足立区':   -0.07,  # n=67, hits=1, rate 1.5%
+    '大田区':   -0.10,  # n=646, hits=8, rate 1.2%
+    '千代田区': -0.10,  # n=7, hits=0
+    '三鷹市':   -0.12,  # n=10, hits=0
+    '品川区':   -0.13,  # n=218, hits=2, rate 0.9%
+    '中央区':   -0.13,  # n=12, hits=0
+    '荒川区':   -0.13,  # n=11, hits=0
+    '港区':     -0.15,  # n=18, hits=0
+    '北区':     -0.18,  # n=31, hits=0
+    '墨田区':   -0.20,  # n=58, hits=0
+    '江東区':   -0.21,  # n=84, hits=0
 }
 
 DATA_DIR = Path("data")
@@ -337,7 +369,7 @@ COVERAGE_DETECT = TOKYO_WARDS + FUNTS_CITIES        # 所在地 → 区/市 判�
 
 COMPANY_FUNTS = "funts"
 COMPANY_SUMMIT = "Summit Society"
-SLOT_CAP = {COMPANY_FUNTS: 50, COMPANY_SUMMIT: 10}   # SUUMO 套餐枠 (U4 簡易版は枠比のみ使用)
+SLOT_CAP = {COMPANY_FUNTS: 50, COMPANY_SUMMIT: 20}   # SUUMO 套餐枠 (U4 簡易版は枠比のみ使用). 2026-07-13: Summit 10→20
 
 
 def parse_months(text):
@@ -1164,12 +1196,50 @@ def _load_active_building_keys(db_id):
     log(f"  build dedup: active 建物キー {len(_seen_building_keys)} 件ロード")
 
 
+# 空き枠連動 assignee 決定用: 各社の「枠占有 row 数」(広告待ち + 掲載指示済み) を
+# pipeline 起動後の初回 decide_assignee 時に 1 回だけ query してキャッシュ。
+# 以降は本 run 内で assign する度に +1 (run 跨ぎの精密さより API 節約を優先)。
+_slot_occupancy = None
+_slot_lock = threading.Lock()
+_SLOT_OCCUPYING_STATUSES = ["広告待ち", "掲載指示済み"]
+
+
+def _load_slot_occupancy():
+    counts = {COMPANY_FUNTS: 0, COMPANY_SUMMIT: 0}
+    for company in counts:
+        rows = notion_query(RECOMMEND_DATABASE_ID, filter_obj={
+            "and": [
+                {"property": "担当会社", "select": {"equals": company}},
+                {"or": [{"property": "Status", "status": {"equals": s}}
+                        for s in _SLOT_OCCUPYING_STATUSES]},
+            ]})
+        counts[company] = len(rows)
+    log(f"  枠占有 load: funts {counts[COMPANY_FUNTS]}/{SLOT_CAP[COMPANY_FUNTS]}, "
+        f"Summit {counts[COMPANY_SUMMIT]}/{SLOT_CAP[COMPANY_SUMMIT]}")
+    return counts
+
+
 def decide_assignee(funts_elig, summit_elig):
-    """両社可 物件を SLOT_CAP 比 (funts:Summit = 50:10) でランダム振り分け (U4 簡易版)。
-    片側のみ eligible ならそのまま確定。SS go-live 時に「空き枠連動」版へ差し替え予定。"""
+    """両社可 物件は「空き枠連動」で振り分け (2026-07-14 差し替え、旧: SLOT_CAP 比ランダム)。
+    占有率 (広告待ち+掲載指示済み / SLOT_CAP) が低い方に派す → 空いてる側が自動的に
+    優先充填され、追い付いたら実質 SLOT_CAP 比で均衡。同率は SLOT_CAP 比ランダム。
+    片側のみ eligible ならそのまま確定。"""
+    global _slot_occupancy
     if funts_elig and summit_elig:
-        f, s = SLOT_CAP[COMPANY_FUNTS], SLOT_CAP[COMPANY_SUMMIT]
-        return COMPANY_FUNTS if random.random() * (f + s) < f else COMPANY_SUMMIT
+        with _slot_lock:
+            if _slot_occupancy is None:
+                _slot_occupancy = _load_slot_occupancy()
+            occ_f = _slot_occupancy[COMPANY_FUNTS] / SLOT_CAP[COMPANY_FUNTS]
+            occ_s = _slot_occupancy[COMPANY_SUMMIT] / SLOT_CAP[COMPANY_SUMMIT]
+            if occ_f < occ_s:
+                chosen = COMPANY_FUNTS
+            elif occ_s < occ_f:
+                chosen = COMPANY_SUMMIT
+            else:
+                f, s = SLOT_CAP[COMPANY_FUNTS], SLOT_CAP[COMPANY_SUMMIT]
+                chosen = COMPANY_FUNTS if random.random() * (f + s) < f else COMPANY_SUMMIT
+            _slot_occupancy[chosen] += 1
+        return chosen
     if funts_elig:
         return COMPANY_FUNTS
     if summit_elig:
@@ -1342,7 +1412,7 @@ def process_property(prop_data, browser_page, browser_context):
                 log(f"  💀 築{age}年 (死亡帯 {DEAD_ZONE_AGE_MIN}-{DEAD_ZONE_AGE_MAX}, {built}年築) → おすすめ DB 書込 skip (dead_zone_age)")
                 return "dead_zone_age"
         # 派発分割: 管理会社可否(共通) は判定済み。担当会社は「エリア × 枠比」で決める
-        #   15区   = funts/Summit 両方が地理的に可 → SLOT_CAP 比 (50:10) でランダム
+        #   15区   = funts/Summit 両方が地理的に可 → SLOT_CAP 比 (50:20) でランダム
         #   8区+2市 = funts 専用エリア            → funts
         #   カバー外 = 投稿しない
         ward = prop_data.get("city", "")

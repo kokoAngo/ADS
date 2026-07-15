@@ -5,7 +5,7 @@ Watch Registrations - 独立服务 (2026-05-18 〜 中介数ベース撤退判�
 
 3 DB 跨ぎフロー:
 1. 掲載物件のみ DB (35f1c197..., ADs-Manager が forrent 掲載中物件を upsert) 全件 query
-   → `名称` (title) から prefix 剥がして 12 桁 REINS_ID 抽出 (og 系は skip)
+   → `自社物件番号` (title) から prefix 剥がして 12 桁 REINS_ID 抽出 (og 系は skip)
 2. おすすめ DB (3171c197...) 全 row を pre-fetch して dict 化、REINS_ID で lookup
    → 該当 row なければ skip (書き戻し先なし)
 3. MAIN DB (3031c197...) から REINS_ID で rent/area 取得 (SUUMO 過滤用)
@@ -69,7 +69,7 @@ AREA_TOL_M2 = 2.0      # m2
 
 # 中介数ベース自動撤退 (2026-05-18 再導入、旧 RETIRE_BY_LISTING_COUNT=10 から 30 に引き上げ)
 # PV ベース撤退 (PVMonitor/retire_by_pv.py) と並列 OR 条件。
-RETIRE_BY_LISTING_COUNT = 13   # SUUMO 上の中介数 >= 此值 → Status=要取り下げ 自動セット (2026-07-03: 15→13 引き下げ)
+RETIRE_BY_LISTING_COUNT = 10   # SUUMO 上の中介数 >= 此值 → Status=要取り下げ 自動セット (2026-07-03: 15→13, 2026-07-15: 13→10 引き下げ)
 RETIRE_DRY_RUN = os.getenv("RETIRE_DRY_RUN", "0") == "1"   # 1 なら撤退時 Notion 書込 skip、log と audit CSV のみ
 
 # 撤退対象外 Status (終態 + 既に要取り下げ済み)
@@ -407,14 +407,14 @@ def process_one(item, browser_page):
     return "not_found"
 
 
-# 掲載物件のみ DB の `名称` (title) prefix 規則 (sync_outcomes.py:156 と同じ)
+# 掲載物件のみ DB の `自社物件番号` (title) prefix 規則 (sync_outcomes.py:156 と同じ)
 #   AI100138178064 / fng100138625774 → 前置を剥がせば REINS_ID
 #   og844 / og50 → ad-system 独自 ID (REINS なし、照合不可なので skip)
 _REINS_PREFIX_RE = re.compile(r"^(AI|fng)(\d{12})$")
 
 
 def extract_reins_id(name):
-    """`名称` (title) から 12 桁 REINS_ID を取り出す。og 系などは None."""
+    """`自社物件番号` (title) から 12 桁 REINS_ID を取り出す。og 系などは None."""
     if not name:
         return None
     m = _REINS_PREFIX_RE.match(name.strip())
@@ -468,7 +468,7 @@ def collect_from_listing_only_db():
     items = []
     stat = {"non_reins": 0, "no_osusume_row": 0, "ok": 0}
     for p in pages:
-        title = p["properties"].get("名称", {}).get("title", [])
+        title = p["properties"].get("自社物件番号", {}).get("title", [])
         name_raw = "".join(t.get("plain_text", "") for t in title).strip()
         reins_id = extract_reins_id(name_raw)
         if not reins_id:
