@@ -57,9 +57,11 @@ JST = timezone(timedelta(hours=9))
 # 配置
 # ============================================================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-MAIN_DATABASE_ID = "3031c197-4dad-800b-917d-d09b8602ec39"          # 全物件 DB (rent/area 取得元)
-LISTING_ONLY_DB_ID = "35f1c1974dad80ccb54fe17cfd116328"            # 掲載物件のみ (ADs-Manager が upsert、source)
-OSUSUME_DB_ID = "3171c1974dad80439367df13aa67f012"                 # おすすめ DB (lookup 元 + 登録店舗数 書き戻し先)
+# 多社対応: 会社別に異なるのは LISTING_ONLY_DB_ID (掲載物件のみ) のみ。env 未設定なら funts 既定値。
+# SS 等は .env で LISTING_ONLY_DB_ID=<その会社の表> を指定する (MAIN/OSUSUME は共有=既定のまま)。
+MAIN_DATABASE_ID = os.getenv("MAIN_DATABASE_ID", "3031c197-4dad-800b-917d-d09b8602ec39")   # 全物件 DB (rent/area、共有)
+LISTING_ONLY_DB_ID = os.getenv("LISTING_ONLY_DB_ID", "35f1c1974dad80ccb54fe17cfd116328")   # 掲載物件のみ (会社別)
+OSUSUME_DB_ID = os.getenv("OSUSUME_DB_ID", "3171c1974dad80439367df13aa67f012")             # おすすめ DB (共有)
 
 SUUMO_SEARCH_URL = "https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=040&ta=13"
 
@@ -69,7 +71,7 @@ AREA_TOL_M2 = 2.0      # m2
 
 # 中介数ベース自動撤退 (2026-05-18 再導入、旧 RETIRE_BY_LISTING_COUNT=10 から 30 に引き上げ)
 # PV ベース撤退 (PVMonitor/retire_by_pv.py) と並列 OR 条件。
-RETIRE_BY_LISTING_COUNT = 10   # SUUMO 上の中介数 >= 此值 → Status=要取り下げ 自動セット (2026-07-03: 15→13, 2026-07-15: 13→10 引き下げ)
+RETIRE_BY_LISTING_COUNT = int(os.getenv("RETIRE_BY_LISTING_COUNT", "10"))   # SUUMO 上の中介数 >= 此值 → 要取り下げ (既定10; 2026-07-03:15→13, 07-15:13→10)
 RETIRE_DRY_RUN = os.getenv("RETIRE_DRY_RUN", "0") == "1"   # 1 なら撤退時 Notion 書込 skip、log と audit CSV のみ
 
 # 撤退対象外 Status (終態 + 既に要取り下げ済み)
