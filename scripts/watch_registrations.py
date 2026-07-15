@@ -43,6 +43,8 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
+import pg_main   # 2026-07-15: rent/area は PG から取得 (Notion MAIN DB は 25万行上限で query 不能)
+
 from playwright.sync_api import sync_playwright
 from datetime import timezone, timedelta
 
@@ -144,33 +146,10 @@ def _rich_text(props, field):
 
 
 def fetch_property_details(reins_id):
-    """返回 dict {rent_man, area_sqm} 或 None"""
-    pages = notion_query(MAIN_DATABASE_ID, filter_obj={
-        "property": "REINS_ID",
-        "title": {"equals": reins_id}
-    })
-    if not pages:
-        return None
-    props = pages[0]["properties"]
-
-    data = {}
-    rent_text = _rich_text(props, "賃料（万円）")
-    if rent_text:
-        try:
-            data["rent_man"] = float(rent_text)
-        except ValueError:
-            pass
-
-    area_text = _rich_text(props, "使用部分面積（m2）")
-    if area_text:
-        try:
-            data["area_sqm"] = float(area_text)
-        except ValueError:
-            pass
-
-    if data.get("rent_man") and data.get("area_sqm"):
-        return data
-    return None
+    """返回 dict {rent_man, area_sqm} 或 None。
+    2026-07-15: Notion MAIN DB(3031) が 25万行上限に到達し query 不能になったため、
+    PG (main.shinchaku_bukken) から取得に変更 (process_pipeline と同じデータソース)。"""
+    return pg_main.fetch_rent_area(reins_id)
 
 
 # ============================================================

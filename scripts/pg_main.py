@@ -3,7 +3,7 @@ PostgreSQL main.shinchaku_bukken。おすすめ/管理会社判定 等其他 Not
 
 连接: 环境变量 FANGO_MAIN_DSN (默认本机 socket)。
   本机(PG 所在):  FANGO_MAIN_DSN="dbname=fango"
-  远程(新机等):   FANGO_MAIN_DSN="host=172.31.212.31 port=5432 dbname=fango user=<rw> password=<pw>"
+  远程(新机等):   FANGO_MAIN_DSN="host=172.31.212.36 port=5432 dbname=fango user=<rw> password=<pw>"
 多线程: 每个 worker 线程各自一条连接 (thread-local)。
 """
 from __future__ import annotations
@@ -12,6 +12,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 DSN = os.getenv("FANGO_MAIN_DSN", "dbname=fango")
+_CONNECT_TIMEOUT = int(os.getenv("FANGO_PG_CONNECT_TIMEOUT", "10"))
 
 # Notion 属性名 → (PG 列名, Notion 值类型)。只这些是 ADS 回写的评分列。
 _MAP = {
@@ -29,8 +30,28 @@ _local = threading.local()
 def _conn():
     c = getattr(_local, "conn", None)
     if c is None or c.closed:
-        _local.conn = psycopg.connect(DSN, autocommit=True)
+        _local.conn = psycopg.connect(DSN, autocommit=True, connect_timeout=_CONNECT_TIMEOUT)
     return _local.conn
+
+
+def ping(timeout: int = 5) -> bool:
+    """轻量到达性检查: 独立短命连接 SELECT 1 (不用 thread-local conn, 不影响正常连接状态)。"""
+    try:
+        with psycopg.connect(DSN, connect_timeout=timeout, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return True
+    except Exception:
+        return False
+
+
+def max_created_time():
+    """スクレイパー死活监视用。返回 (max(created_time), pg_now())；pg_now 可复用于本机时钟偏移检测。"""
+    with _conn().cursor() as cur:
+        cur.execute("SELECT max(created_time), now() FROM main.shinchaku_bukken")
+        row = cur.fetchone()
+        return row[0], row[1]
 
 
 def fetch_unscored(cutoff):
@@ -52,6 +73,25 @@ def has_unscored(cutoff) -> bool:
     with _conn().cursor() as cur:
         cur.execute(sql, (cutoff,))
         return bool(cur.fetchone()[0])
+
+
+def fetch_rent_area(reins_id):
+    """reins_id で rent_man / area_sqm を取得 (watch_registrations の SUUMO 過滤用)。
+    2026-07-15: Notion MAIN DB が 25万行上限に到達し query 不能になったため PG に移行。
+    両方揃って float 化できたときだけ dict を返す (Notion 版 fetch_property_details と同契約)。"""
+    with _conn().cursor() as cur:
+        cur.execute("SELECT rent_man, area_sqm FROM main.shinchaku_bukken "
+                    "WHERE reins_id = %s LIMIT 1", (reins_id,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    try:
+        rent, area = float(row[0]), float(row[1])
+    except (TypeError, ValueError):
+        return None
+    if rent and area:
+        return {"rent_man": rent, "area_sqm": area}
+    return None
 
 
 def _scalar(prop: dict):
